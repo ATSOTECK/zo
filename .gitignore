@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+.DS_Store
+.idea
+cmake-build-debug
+cmake-build-release
+build
+bin
