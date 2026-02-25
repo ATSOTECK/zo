@@ -123,6 +123,12 @@ namespace expr {
     };
     struct Try  { ExprPtr operand; };                   // try expr
     struct Else { ExprPtr value; ExprPtr fallback; };   // expr else default
+    struct Catch {
+        ExprPtr operand;
+        std::string errVar;
+        bool isConst;
+        std::vector<StmtPtr> body;
+    };
 }
 
 using ExprKind = std::variant<
@@ -149,7 +155,8 @@ using ExprKind = std::variant<
     expr::EnumVariant,
     expr::UnionVariant,
     expr::Try,
-    expr::Else
+    expr::Else,
+    expr::Catch
 >;
 
 struct Expr {
@@ -314,6 +321,11 @@ namespace decl {
         std::string name;
         std::vector<TypeRefPtr> types;
     };
+
+    struct ErrorEnum {
+        std::string name;
+        std::vector<EnumVariantDef> variants;
+    };
 }
 
 using DeclKind = std::variant<
@@ -326,7 +338,8 @@ using DeclKind = std::variant<
     decl::TypeAlias,
     decl::Enum,
     decl::Union,
-    decl::Constraint
+    decl::Constraint,
+    decl::ErrorEnum
 >;
 
 struct Decl {

@@ -381,6 +381,7 @@ Token Lexer::nextToken() {
             return Token{TokenKind::Percent, "%", {filename_, startLine, startCol}};
 
         case '=':
+            if (peek() == '>') { advance(); return Token{TokenKind::FatArrow, "=>", {filename_, startLine, startCol}}; }
             if (peek() == '=') { advance(); return Token{TokenKind::Equal, "==", {filename_, startLine, startCol}}; }
             return Token{TokenKind::Assign, "=", {filename_, startLine, startCol}};
 

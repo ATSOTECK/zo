@@ -180,6 +180,13 @@ Decl Parser::parseTypeDecl() {
         return Decl{decl::Constraint{name, std::move(types)}, location};
     }
 
+    // type X error { ... }
+    if (check(TokenKind::Error)) {
+        advance();
+        auto errorEnum = parseErrorEnum(name);
+        return Decl{std::move(errorEnum), location};
+    }
+
     // Optional type params: type Stack<T> struct { ... }
     std::vector<TypeParam> typeParams;
     if (check(TokenKind::Less)) {
@@ -395,6 +402,31 @@ decl::Union Parser::parseUnion() {
     expectSemicolon();
 
     return decl::Union{name, std::move(variants)};
+}
+
+decl::ErrorEnum Parser::parseErrorEnum(const std::string& name) {
+    expect(TokenKind::LBrace, "expected '{'");
+
+    std::vector<EnumVariantDef> variants;
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        if (match(TokenKind::Semicolon)) continue;
+
+        auto varLoc = loc();
+        auto varName = expect(TokenKind::Ident, "expected variant name").text;
+
+        variants.push_back(EnumVariantDef{varName, std::nullopt, varLoc});
+
+        if (!check(TokenKind::RBrace)) {
+            if (!match(TokenKind::Comma)) {
+                match(TokenKind::Semicolon);
+            }
+        }
+    }
+
+    expect(TokenKind::RBrace, "expected '}'");
+    expectSemicolon();
+
+    return decl::ErrorEnum{name, std::move(variants)};
 }
 
 // ─── Match statement ────────────────────────────────────────────────
@@ -1417,6 +1449,17 @@ ExprPtr Parser::parsePostfix() {
             } else {
                 break;
             }
+        } else if (check(TokenKind::FatArrow)) {
+            // Catch operator: expr => [const err] { body }
+            auto catchLoc = loc();
+            advance(); // consume =>
+            expect(TokenKind::LBracket, "expected '[' after '=>'");
+            bool isConst = match(TokenKind::Const);
+            auto errVar = expect(TokenKind::Ident, "expected error variable name").text;
+            expect(TokenKind::RBracket, "expected ']'");
+            auto block = parseBlock();
+            result = std::make_unique<Expr>(Expr{
+                expr::Catch{std::move(result), errVar, isConst, std::move(block->stmts)}, catchLoc});
         } else if (check(TokenKind::Else)) {
             // Optional unwrap: expr else fallback
             auto elseLoc = loc(); advance();

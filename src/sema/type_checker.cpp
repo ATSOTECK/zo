@@ -114,6 +114,17 @@ void TypeChecker::registerDecl(const Decl& decl) {
         else if constexpr (std::is_same_v<T, decl::Constraint>) {
             symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
         }
+        else if constexpr (std::is_same_v<T, decl::ErrorEnum>) {
+            symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
+            EnumMeta meta;
+            meta.name = d.name;
+            for (const auto& v : d.variants) {
+                meta.variants.push_back(v.name);
+                symbols_.define(d.name + v.name,
+                    Symbol{d.name + v.name, SymbolKind::Constant, v.loc, d.name});
+            }
+            enumTypes_[d.name] = std::move(meta);
+        }
     }, decl.kind);
 }
 
@@ -180,6 +191,15 @@ void TypeChecker::checkDecl(const Decl& decl) {
         }
         else if constexpr (std::is_same_v<T, decl::Constraint>) {
             // Already registered in registerDecl
+        }
+        else if constexpr (std::is_same_v<T, decl::ErrorEnum>) {
+            // Check for duplicate variants
+            std::unordered_set<std::string> seen;
+            for (const auto& v : d.variants) {
+                if (!seen.insert(v.name).second) {
+                    diag_.error(v.loc, "duplicate error variant '" + v.name + "'");
+                }
+            }
         }
     }, decl.kind);
 }
@@ -420,6 +440,13 @@ void TypeChecker::checkExpr(const Expr& expr) {
         else if constexpr (std::is_same_v<T, expr::Else>) {
             checkExpr(*e.value);
             checkExpr(*e.fallback);
+        }
+        else if constexpr (std::is_same_v<T, expr::Catch>) {
+            checkExpr(*e.operand);
+            symbols_.enterScope();
+            symbols_.define(e.errVar, Symbol{e.errVar, SymbolKind::Variable, expr.loc, "catch_err"});
+            checkBlock(e.body);
+            symbols_.exitScope();
         }
         // Literals (StringLit, IntLit, FloatLit, BoolLit, NilLit, This) — nothing to check
     }, expr.kind);

@@ -42,15 +42,15 @@ std::string GoCodegen::generate(const File& file) {
     indentLevel_ = 0;
     enums_.clear();
     unions_.clear();
+    needsErrStruct_ = false;
 
-    // Pre-scan for enum and union declarations to enable shorthand resolution
+    // Pre-scan for enum, union, error enum declarations and T! functions
     for (const auto& decl : file.decls) {
         if (auto* e = std::get_if<decl::Enum>(&decl.kind)) {
             EnumInfo info;
             info.name = e->name;
             info.underlying = "int";
             if (e->underlying_type.has_value()) {
-                // Extract underlying type name
                 if (auto* named = std::get_if<type_ref::Named>(&(*e->underlying_type)->kind)) {
                     info.underlying = mapType(named->name);
                 }
@@ -73,11 +73,73 @@ std::string GoCodegen::generate(const File& file) {
                 info.variants.push_back(std::move(vi));
             }
             unions_.push_back(std::move(info));
+        } else if (auto* ee = std::get_if<decl::ErrorEnum>(&decl.kind)) {
+            EnumInfo info;
+            info.name = ee->name;
+            info.underlying = "int";
+            for (const auto& v : ee->variants) {
+                info.variants.push_back(v.name);
+            }
+            enums_.push_back(std::move(info));
+        }
+        // Check for T! return types to determine if we need the Err struct
+        if (auto* fn = std::get_if<decl::Func>(&decl.kind)) {
+            for (const auto& ret : fn->returns) {
+                if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                    needsErrStruct_ = true;
+                    break;
+                }
+            }
+        } else if (auto* impl = std::get_if<decl::ImplBlock>(&decl.kind)) {
+            for (const auto& method : impl->methods) {
+                for (const auto& ret : method.returns) {
+                    if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                        needsErrStruct_ = true;
+                        break;
+                    }
+                }
+                if (needsErrStruct_) break;
+            }
         }
     }
 
+    // Emit declarations; inject Err struct after package + imports
+    bool errStructEmitted = false;
     for (const auto& decl : file.decls) {
         emitDecl(decl);
+        // Emit Err struct after the last import (or after package if no imports)
+        if (!errStructEmitted && needsErrStruct_) {
+            bool isPackageOrImport = std::holds_alternative<decl::Package>(decl.kind) ||
+                                     std::holds_alternative<decl::Import>(decl.kind);
+            // Check if next decl is not an import
+            bool nextIsImport = false;
+            size_t idx = &decl - &file.decls[0];
+            if (idx + 1 < file.decls.size()) {
+                nextIsImport = std::holds_alternative<decl::Import>(file.decls[idx + 1].kind);
+            }
+            if (isPackageOrImport && !nextIsImport) {
+                writeln("type Err struct{ Code int; Msg string; Cause error }");
+                write("\n");
+                writeln("func (e *Err) Error() string {");
+                indent();
+                writeln("if e.Msg != \"\" { return e.Msg }");
+                writeln("return fmt.Sprintf(\"error code %d\", e.Code)");
+                dedent();
+                writeln("}");
+                write("\n");
+                writeln("func (e *Err) Unwrap() error { return e.Cause }");
+                write("\n");
+                writeln("func __toErr(e error) *Err {");
+                indent();
+                writeln("if e == nil { return nil }");
+                writeln("if err, ok := e.(*Err); ok { return err }");
+                writeln("return &Err{Msg: e.Error(), Cause: e}");
+                dedent();
+                writeln("}");
+                write("\n");
+                errStructEmitted = true;
+            }
+        }
     }
 
     return out_.str();
@@ -240,6 +302,25 @@ void GoCodegen::emitDecl(const Decl& decl) {
             }
             write(" }\n\n");
         }
+        else if constexpr (std::is_same_v<T, decl::ErrorEnum>) {
+            // Emit as Go int enum with iota, same as regular enum
+            writeln("type " + d.name + " int");
+            writeln("const (");
+            indent();
+            for (size_t i = 0; i < d.variants.size(); ++i) {
+                const auto& v = d.variants[i];
+                writeIndent();
+                if (i == 0) {
+                    write(d.name + v.name + " " + d.name + " = iota");
+                } else {
+                    write(d.name + v.name);
+                }
+                write("\n");
+            }
+            dedent();
+            writeln(")");
+            write("\n");
+        }
     }, decl.kind);
 }
 
@@ -249,12 +330,14 @@ void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool
     const std::vector<TypeRefPtr>* prevReturns = currentReturns_;
     int prevTry = tryCounter_;
     int prevElse = elseCounter_;
+    int prevCatch = catchCounter_;
 
     // Detect if the function returns T! (Result type)
     inResultFunc_ = false;
     currentReturns_ = &fn.returns;
     tryCounter_ = 0;
     elseCounter_ = 0;
+    catchCounter_ = 0;
     for (const auto& ret : fn.returns) {
         if (std::holds_alternative<type_ref::Result>(ret->kind)) {
             inResultFunc_ = true;
@@ -307,6 +390,7 @@ void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool
     currentReturns_ = prevReturns;
     tryCounter_ = prevTry;
     elseCounter_ = prevElse;
+    catchCounter_ = prevCatch;
 }
 
 void GoCodegen::emitReturnTypes(const std::vector<TypeRefPtr>& returns) {
@@ -356,7 +440,7 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                                 auto& ret = (*currentReturns_)[i];
                                 if (std::holds_alternative<type_ref::Result>(ret->kind)) {
                                     auto& inner = std::get<type_ref::Result>(ret->kind).inner;
-                                    write(zeroValueForType(*inner) + ", " + errVar);
+                                    write(zeroValueForType(*inner) + ", __toErr(" + errVar + ")");
                                 } else {
                                     write(zeroValueForType(*ret));
                                 }
@@ -389,7 +473,7 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                             auto& ret = (*currentReturns_)[i];
                             if (std::holds_alternative<type_ref::Result>(ret->kind)) {
                                 auto& inner = std::get<type_ref::Result>(ret->kind).inner;
-                                write(zeroValueForType(*inner) + ", " + errVar);
+                                write(zeroValueForType(*inner) + ", __toErr(" + errVar + ")");
                             } else {
                                 write(zeroValueForType(*ret));
                             }
@@ -398,6 +482,38 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                     write("\n");
                     dedent();
                     writeln("}");
+                    return;
+                }
+            }
+            // Handle ShortDecl with catch: x := foo() => [err] { ... }
+            if (auto* sd = std::get_if<expr::ShortDecl>(&s.expr->kind)) {
+                if (sd->value && std::holds_alternative<expr::Catch>(sd->value->kind)) {
+                    auto& catchExpr = std::get<expr::Catch>(sd->value->kind);
+                    int n = catchCounter_++;
+                    std::string catchVar = "__catch" + std::to_string(n);
+                    std::string cerrVar = "__cerr" + std::to_string(n);
+                    // __catchN, __cerrN := operand
+                    writeIndent();
+                    write(catchVar + ", " + cerrVar + " := ");
+                    emitExpr(*catchExpr.operand);
+                    write("\n");
+                    // if __cerrN != nil { err := __cerrN; _ = err; body }
+                    writeln("if " + cerrVar + " != nil {");
+                    indent();
+                    writeln(catchExpr.errVar + " := " + cerrVar);
+                    writeln("_ = " + catchExpr.errVar);
+                    for (const auto& bodyStmt : catchExpr.body) {
+                        emitStmt(*bodyStmt);
+                    }
+                    dedent();
+                    writeln("}");
+                    // x := __catchN
+                    writeIndent();
+                    for (size_t i = 0; i < sd->names.size(); ++i) {
+                        if (i > 0) write(", ");
+                        write(sd->names[i]);
+                    }
+                    write(" := " + catchVar + "\n");
                     return;
                 }
             }
@@ -458,7 +574,7 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                                 auto& ret = (*currentReturns_)[i];
                                 if (std::holds_alternative<type_ref::Result>(ret->kind)) {
                                     auto& inner = std::get<type_ref::Result>(ret->kind).inner;
-                                    write(zeroValueForType(*inner) + ", " + errVar);
+                                    write(zeroValueForType(*inner) + ", __toErr(" + errVar + ")");
                                 } else {
                                     write(zeroValueForType(*ret));
                                 }
@@ -472,13 +588,70 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                         return;
                     }
                 }
-                // Auto-append nil: return val → return val, nil
-                writeIndent();
-                write("return");
-                for (size_t i = 0; i < s.values.size(); ++i) {
-                    write(i == 0 ? " " : ", ");
-                    emitExpr(*s.values[i]);
+                // Check if single return value is Err{...} composite literal
+                if (s.values.size() == 1) {
+                    auto* compLit = std::get_if<expr::CompositeLit>(&s.values[0]->kind);
+                    if (compLit && compLit->type) {
+                        auto* named = std::get_if<type_ref::Named>(&compLit->type->kind);
+                        if (named && named->name == "Err") {
+                            // return Err{...} → return zeroVal, &Err{...}
+                            writeIndent();
+                            write("return ");
+                            if (currentReturns_) {
+                                for (size_t i = 0; i < currentReturns_->size(); ++i) {
+                                    auto& ret = (*currentReturns_)[i];
+                                    if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                                        auto& inner = std::get<type_ref::Result>(ret->kind).inner;
+                                        write(zeroValueForType(*inner) + ", &");
+                                        emitExpr(*s.values[0]);
+                                    } else {
+                                        write(zeroValueForType(*ret));
+                                    }
+                                    if (i + 1 < currentReturns_->size()) write(", ");
+                                }
+                            }
+                            write("\n");
+                            return;
+                        }
+                    }
                 }
+
+                // Two or more values: explicit return, no nil append
+                if (s.values.size() >= 2) {
+                    writeIndent();
+                    write("return");
+                    for (size_t i = 0; i < s.values.size(); ++i) {
+                        write(i == 0 ? " " : ", ");
+                        emitExpr(*s.values[i]);
+                    }
+                    write("\n");
+                    return;
+                }
+
+                // Zero values: return zeroVal, nil
+                if (s.values.empty()) {
+                    writeIndent();
+                    write("return ");
+                    if (currentReturns_) {
+                        for (size_t i = 0; i < currentReturns_->size(); ++i) {
+                            if (i > 0) write(", ");
+                            auto& ret = (*currentReturns_)[i];
+                            if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                                auto& inner = std::get<type_ref::Result>(ret->kind).inner;
+                                write(zeroValueForType(*inner) + ", nil");
+                            } else {
+                                write(zeroValueForType(*ret));
+                            }
+                        }
+                    }
+                    write("\n");
+                    return;
+                }
+
+                // Single value (normal): return val, nil
+                writeIndent();
+                write("return ");
+                emitExpr(*s.values[0]);
                 write(", nil\n");
             } else {
                 writeIndent();
@@ -885,6 +1058,11 @@ void GoCodegen::emitExpr(const Expr& expr) {
             // (statement-level else is handled in emitStmt)
             emitExpr(*e.value);
         }
+        else if constexpr (std::is_same_v<T, expr::Catch>) {
+            // Fallback: catch in expression position emits just the operand
+            // (statement-level catch is handled in emitStmt)
+            emitExpr(*e.operand);
+        }
     }, expr.kind);
 }
 
@@ -1115,7 +1293,7 @@ void GoCodegen::emitTypeRef(const TypeRef& type) {
         else if constexpr (std::is_same_v<T, type_ref::Result>) {
             write("(");
             emitTypeRef(*t.inner);
-            write(", error)");
+            write(", *Err)");
         }
         else if constexpr (std::is_same_v<T, type_ref::Optional>) {
             write("*");

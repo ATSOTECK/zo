@@ -38,6 +38,7 @@ private:
     decl::ImplBlock parseImpl();
     decl::Enum parseEnum();
     decl::Union parseUnion();
+    decl::ErrorEnum parseErrorEnum(const std::string& name);
 
     // Statements (match)
     StmtPtr parseMatch();

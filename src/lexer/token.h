@@ -44,6 +44,7 @@ enum class TokenKind {
     Break,
     Continue,
     Fallthrough,
+    Error,
     Nil,
     True,
     False,
@@ -87,6 +88,7 @@ enum class TokenKind {
     PlusPlus,       // ++
     MinusMinus,     // --
     Ellipsis,       // ...
+    FatArrow,       // =>
 
     // Delimiters
     LParen,         // (

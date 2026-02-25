@@ -37,6 +37,7 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::Break:          return "break";
         case TokenKind::Continue:       return "continue";
         case TokenKind::Fallthrough:    return "fallthrough";
+        case TokenKind::Error:          return "error";
         case TokenKind::Nil:            return "nil";
         case TokenKind::True:           return "true";
         case TokenKind::False:          return "false";
@@ -78,6 +79,7 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::PlusPlus:       return "++";
         case TokenKind::MinusMinus:     return "--";
         case TokenKind::Ellipsis:       return "...";
+        case TokenKind::FatArrow:       return "=>";
         case TokenKind::LParen:         return "(";
         case TokenKind::RParen:         return ")";
         case TokenKind::LBrace:         return "{";
@@ -125,6 +127,7 @@ const std::unordered_map<std::string, TokenKind>& keywordMap() {
         {"break",       TokenKind::Break},
         {"continue",    TokenKind::Continue},
         {"fallthrough", TokenKind::Fallthrough},
+        {"error",       TokenKind::Error},
         {"nil",         TokenKind::Nil},
         {"true",        TokenKind::True},
         {"false",       TokenKind::False},

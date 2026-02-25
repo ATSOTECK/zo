@@ -51,6 +51,8 @@ private:
     const std::vector<TypeRefPtr>* currentReturns_ = nullptr;
     int tryCounter_ = 0;
     int elseCounter_ = 0;
+    int catchCounter_ = 0;
+    bool needsErrStruct_ = false;
 
     struct EnumInfo {
         std::string name;
