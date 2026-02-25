@@ -70,6 +70,12 @@ private:
     std::vector<UnionInfo> unions_;
 
     static const std::unordered_map<std::string, std::string> typeMap_;
+
+    // Import resolution: short name → full Go import path
+    std::unordered_map<std::string, std::string> importMap_;
+
+public:
+    void setImportMap(const std::unordered_map<std::string, std::string>& map) { importMap_ = map; }
 };
 
 } // namespace zo

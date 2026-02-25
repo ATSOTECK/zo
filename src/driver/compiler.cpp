@@ -28,6 +28,7 @@ std::string Compiler::compile(const std::string& source, const std::string& file
 
     // Codegen
     GoCodegen codegen(diag_);
+    codegen.setImportMap(importMap_);
     return codegen.generate(file);
 }
 

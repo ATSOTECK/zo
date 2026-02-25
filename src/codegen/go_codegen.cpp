@@ -134,10 +134,19 @@ void GoCodegen::emitDecl(const Decl& decl) {
             write("\n");
         }
         else if constexpr (std::is_same_v<T, decl::Import>) {
+            std::string goPath = d.name;
+            auto it = importMap_.find(d.name);
+            if (it != importMap_.end()) goPath = it->second;
+
             if (d.alias.has_value()) {
-                writeln("import " + d.alias.value() + " \"" + d.name + "\"");
+                writeln("import " + d.alias.value() + " \"" + goPath + "\"");
             } else {
-                writeln("import \"" + d.name + "\"");
+                std::string lastSeg = goPath.substr(goPath.rfind('/') + 1);
+                if (lastSeg != d.name) {
+                    writeln("import " + d.name + " \"" + goPath + "\"");
+                } else {
+                    writeln("import \"" + goPath + "\"");
+                }
             }
             write("\n");
         }

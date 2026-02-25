@@ -11,11 +11,12 @@ static void printUsage() {
     std::cout << "Usage: zo <command> [arguments]\n"
               << "\n"
               << "Commands:\n"
-              << "  build       Compile the current project\n"
-              << "  run         Compile and run the current project\n"
-              << "  init <name> Create a new zo project\n"
-              << "  version     Print the zo version\n"
-              << "  help        Show this help message\n";
+              << "  build                     Compile the current project\n"
+              << "  run                       Compile and run the current project\n"
+              << "  init <name>               Create a new zo project\n"
+              << "  get <pkg> [--version ver]  Add a dependency\n"
+              << "  version                   Print the zo version\n"
+              << "  help                      Show this help message\n";
 }
 
 static void printVersion() {
@@ -58,6 +59,23 @@ int main(int argc, char* argv[]) {
     if (cmd == "run") {
         std::string dir = fs::current_path().string();
         return zo::Project::run(dir);
+    }
+
+    if (cmd == "get") {
+        if (argc < 3) {
+            std::cerr << "error: 'zo get' requires a package name\n";
+            return 1;
+        }
+        std::string package = argv[2];
+        std::string version;
+        for (int i = 3; i < argc - 1; i++) {
+            if (std::strcmp(argv[i], "--version") == 0) {
+                version = argv[i + 1];
+                break;
+            }
+        }
+        std::string dir = fs::current_path().string();
+        return zo::Project::get(dir, package, version);
     }
 
     std::cerr << "error: unknown command '" << cmd << "'\n";

@@ -26,6 +26,11 @@ add_executable(zo
     src/sema/type_checker.cpp
     src/driver/compiler.cpp
     src/driver/project.cpp
+    src/pkg/semver.cpp
+    src/pkg/build_config.cpp
+    src/pkg/lock_file.cpp
+    src/pkg/git_ops.cpp
+    src/pkg/resolver.cpp
 )
 
 target_link_libraries(zo ${LIBGIT2_TARGET})

@@ -4,6 +4,7 @@
 #include "parser/ast.h"
 
 #include <string>
+#include <unordered_map>
 
 namespace zo {
 
@@ -19,10 +20,12 @@ public:
     File parse(const std::string& source, const std::string& filename);
 
     void setCheckTypes(bool enabled) { checkTypes_ = enabled; }
+    void setImportMap(const std::unordered_map<std::string, std::string>& map) { importMap_ = map; }
 
 private:
     DiagnosticEngine& diag_;
     bool checkTypes_ = true;
+    std::unordered_map<std::string, std::string> importMap_;
 };
 
 } // namespace zo
