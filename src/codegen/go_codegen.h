@@ -18,6 +18,7 @@ public:
 private:
     void emitDecl(const Decl& decl);
     void emitFunc(const decl::Func& fn, const std::string& receiver = "", bool valueReceiver = false);
+    void emitTypeParams(const std::vector<TypeParam>& params);
     void emitReturnTypes(const std::vector<TypeRefPtr>& returns);
     void emitStmt(const Stmt& stmt);
     void emitIf(const stmt::If& s);

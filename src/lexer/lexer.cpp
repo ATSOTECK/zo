@@ -246,6 +246,7 @@ bool Lexer::shouldInsertSemicolon(TokenKind lastKind) const {
         case TokenKind::RBracket:
         case TokenKind::Bang:
         case TokenKind::Question:
+        case TokenKind::Greater:
             return true;
         default:
             return false;

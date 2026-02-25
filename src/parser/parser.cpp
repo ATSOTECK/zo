@@ -8,21 +8,34 @@ Parser::Parser(std::vector<Token> tokens, DiagnosticEngine& diag)
 // ─── Token stream ───────────────────────────────────────────────────
 
 const Token& Parser::peek() const {
+    if (pendingGreater_) {
+        static Token syntheticGreater{TokenKind::Greater, ">", {}};
+        syntheticGreater.loc = tokens_[pos_].loc;
+        return syntheticGreater;
+    }
     return tokens_[pos_];
 }
 
 const Token& Parser::peekNext() const {
+    if (pendingGreater_) return tokens_[pos_];
     if (pos_ + 1 < tokens_.size()) return tokens_[pos_ + 1];
     return tokens_.back();
 }
 
 const Token& Parser::advance() {
+    if (pendingGreater_) {
+        pendingGreater_ = false;
+        static Token syntheticGreater{TokenKind::Greater, ">", {}};
+        syntheticGreater.loc = tokens_[pos_].loc;
+        return syntheticGreater;
+    }
     const Token& tok = tokens_[pos_];
     if (pos_ < tokens_.size() - 1) ++pos_;
     return tok;
 }
 
 bool Parser::check(TokenKind kind) const {
+    if (pendingGreater_) return kind == TokenKind::Greater;
     return peek().kind == kind;
 }
 
@@ -129,6 +142,12 @@ decl::Import Parser::parseImport() {
 decl::Func Parser::parseFunc() {
     expect(TokenKind::Func, "expected 'func'");
     auto name = expect(TokenKind::Ident, "expected function name").text;
+
+    std::vector<TypeParam> typeParams;
+    if (check(TokenKind::Less)) {
+        typeParams = parseTypeParams();
+    }
+
     auto params = parseParams();
     auto returns = parseReturnTypes();
 
@@ -139,7 +158,7 @@ decl::Func Parser::parseFunc() {
     }
     expectSemicolon();
 
-    return decl::Func{name, std::move(params), std::move(returns), std::move(body)};
+    return decl::Func{name, std::move(typeParams), std::move(params), std::move(returns), std::move(body)};
 }
 
 Decl Parser::parseTypeDecl() {
@@ -147,15 +166,39 @@ Decl Parser::parseTypeDecl() {
     expect(TokenKind::Type, "expected 'type'");
     auto name = expect(TokenKind::Ident, "expected type name").text;
 
+    // type X constraint { int | f32 | f64 }
+    if (check(TokenKind::Constraint)) {
+        advance();
+        expect(TokenKind::LBrace, "expected '{'");
+        std::vector<TypeRefPtr> types;
+        types.push_back(parseType());
+        while (match(TokenKind::Pipe)) {
+            types.push_back(parseType());
+        }
+        expect(TokenKind::RBrace, "expected '}'");
+        expectSemicolon();
+        return Decl{decl::Constraint{name, std::move(types)}, location};
+    }
+
+    // Optional type params: type Stack<T> struct { ... }
+    std::vector<TypeParam> typeParams;
+    if (check(TokenKind::Less)) {
+        typeParams = parseTypeParams();
+    }
+
     // type X struct { ... }
     if (check(TokenKind::Struct)) {
         advance();
         auto s = parseStructBody(name);
+        s.type_params = std::move(typeParams);
         return Decl{std::move(s), location};
     }
 
     // type X interface { ... }
     if (check(TokenKind::Interface)) {
+        if (!typeParams.empty()) {
+            diag_.error(location, "type parameters not allowed on interfaces");
+        }
         advance();
         expect(TokenKind::LBrace, "expected '{'");
         std::vector<decl::Func> methods;
@@ -165,7 +208,7 @@ Decl Parser::parseTypeDecl() {
             auto mParams = parseParams();
             auto mReturns = parseReturnTypes();
             expectSemicolon();
-            methods.push_back(decl::Func{methodName, std::move(mParams), std::move(mReturns), {}});
+            methods.push_back(decl::Func{methodName, {}, std::move(mParams), std::move(mReturns), {}});
         }
         expect(TokenKind::RBrace, "expected '}'");
         expectSemicolon();
@@ -173,6 +216,9 @@ Decl Parser::parseTypeDecl() {
     }
 
     // type X <other type>
+    if (!typeParams.empty()) {
+        diag_.error(location, "type parameters not allowed on type aliases");
+    }
     auto type = parseType();
     expectSemicolon();
     return Decl{decl::TypeAlias{name, std::move(type)}, location};
@@ -193,7 +239,7 @@ decl::Struct Parser::parseStructBody(const std::string& name) {
     expect(TokenKind::RBrace, "expected '}'");
     expectSemicolon();
 
-    return decl::Struct{name, std::move(fields)};
+    return decl::Struct{name, {}, std::move(fields)};
 }
 
 decl::Interface Parser::parseInterface() {
@@ -208,7 +254,7 @@ decl::Interface Parser::parseInterface() {
         auto params = parseParams();
         auto returns = parseReturnTypes();
         expectSemicolon();
-        methods.push_back(decl::Func{methodName, std::move(params), std::move(returns), {}});
+        methods.push_back(decl::Func{methodName, {}, std::move(params), std::move(returns), {}});
     }
     expect(TokenKind::RBrace, "expected '}'");
     expectSemicolon();
@@ -218,7 +264,32 @@ decl::Interface Parser::parseInterface() {
 
 decl::ImplBlock Parser::parseImpl() {
     expect(TokenKind::Impl, "expected 'impl'");
+
+    // impl<T> Stack<T> { ... }
+    std::vector<TypeParam> typeParams;
+    if (check(TokenKind::Less)) {
+        typeParams = parseTypeParams();
+    }
+
     auto target = expect(TokenKind::Ident, "expected type name").text;
+
+    // Parse target type args: impl<T> Stack<T> { ... }
+    std::vector<std::string> targetTypeArgs;
+    if (check(TokenKind::Less)) {
+        expect(TokenKind::Less, "expected '<'");
+        targetTypeArgs.push_back(expect(TokenKind::Ident, "expected type argument").text);
+        while (match(TokenKind::Comma)) {
+            targetTypeArgs.push_back(expect(TokenKind::Ident, "expected type argument").text);
+        }
+        if (check(TokenKind::Greater)) {
+            advance();
+        } else if (check(TokenKind::ShiftRight)) {
+            advance();
+            pendingGreater_ = true;
+        } else {
+            expect(TokenKind::Greater, "expected '>'");
+        }
+    }
 
     std::optional<std::string> iface;
     if (match(TokenKind::Implements)) {
@@ -235,7 +306,7 @@ decl::ImplBlock Parser::parseImpl() {
     expect(TokenKind::RBrace, "expected '}'");
     expectSemicolon();
 
-    return decl::ImplBlock{target, iface, std::move(methods)};
+    return decl::ImplBlock{target, std::move(typeParams), std::move(targetTypeArgs), iface, std::move(methods)};
 }
 
 // ─── Enum & Union declarations ──────────────────────────────────────
@@ -464,6 +535,109 @@ StmtPtr Parser::parseMatch() {
     return makeStmt<stmt::Match>(location, std::move(value), std::move(arms));
 }
 
+// ─── Generics ───────────────────────────────────────────────────────
+
+std::vector<TypeParam> Parser::parseTypeParams() {
+    // < Ident [: Constraint] [, Ident [: Constraint]]* >
+    expect(TokenKind::Less, "expected '<'");
+    std::vector<TypeParam> params;
+
+    auto paramLoc = loc();
+    auto name = expect(TokenKind::Ident, "expected type parameter name").text;
+    std::optional<std::string> constraint;
+    if (match(TokenKind::Colon)) {
+        constraint = expect(TokenKind::Ident, "expected constraint name").text;
+    }
+    params.push_back(TypeParam{name, constraint, paramLoc});
+
+    while (match(TokenKind::Comma)) {
+        paramLoc = loc();
+        name = expect(TokenKind::Ident, "expected type parameter name").text;
+        constraint = std::nullopt;
+        if (match(TokenKind::Colon)) {
+            constraint = expect(TokenKind::Ident, "expected constraint name").text;
+        }
+        params.push_back(TypeParam{name, constraint, paramLoc});
+    }
+
+    // Accept > or >> (split >> into pending >)
+    if (check(TokenKind::Greater)) {
+        advance();
+    } else if (check(TokenKind::ShiftRight)) {
+        advance();
+        pendingGreater_ = true;
+    } else {
+        expect(TokenKind::Greater, "expected '>'");
+    }
+
+    return params;
+}
+
+std::vector<TypeRefPtr> Parser::parseTypeArgs() {
+    // < Type [, Type]* >
+    expect(TokenKind::Less, "expected '<'");
+    std::vector<TypeRefPtr> args;
+
+    args.push_back(parseType());
+    while (match(TokenKind::Comma)) {
+        args.push_back(parseType());
+    }
+
+    // Accept > or >> (split >> into pending >)
+    if (check(TokenKind::Greater)) {
+        advance();
+    } else if (check(TokenKind::ShiftRight)) {
+        advance();
+        pendingGreater_ = true;
+    } else {
+        expect(TokenKind::Greater, "expected '>'");
+    }
+
+    return args;
+}
+
+bool Parser::looksLikeTypeArgs() const {
+    // Scan forward from current '<' to find matching '>' and check
+    // if it's followed by '(' or '{' (generic call or composite lit).
+    // Handles nested <> and basic type syntax (idents, ::, commas, *, []).
+    if (!check(TokenKind::Less)) return false;
+    size_t i = pos_ + 1;  // skip '<'
+    int depth = 1;
+    while (i < tokens_.size() && depth > 0) {
+        auto k = tokens_[i].kind;
+        if (k == TokenKind::Less) {
+            depth++;
+        } else if (k == TokenKind::Greater) {
+            depth--;
+            if (depth == 0) break;
+        } else if (k == TokenKind::ShiftRight) {
+            depth -= 2;
+            if (depth <= 0) break;
+        } else if (k == TokenKind::Ident || k == TokenKind::Comma ||
+                   k == TokenKind::Star || k == TokenKind::LBracket ||
+                   k == TokenKind::RBracket || k == TokenKind::ColonColon ||
+                   k == TokenKind::Map || k == TokenKind::Chan ||
+                   k == TokenKind::Func || k == TokenKind::Colon ||
+                   k == TokenKind::Dot) {
+            // Valid inside type args
+        } else if (k == TokenKind::Semicolon || k == TokenKind::Eof ||
+                   k == TokenKind::LBrace || k == TokenKind::RBrace) {
+            return false;  // Definitely not type args
+        } else {
+            return false;  // Unexpected token — not type args
+        }
+        i++;
+    }
+    if (depth != 0) return false;
+    // Check what follows the closing '>'
+    size_t next = i + 1;
+    if (next < tokens_.size()) {
+        auto k = tokens_[next].kind;
+        return k == TokenKind::LParen || k == TokenKind::LBrace;
+    }
+    return false;
+}
+
 // ─── Types ──────────────────────────────────────────────────────────
 
 std::vector<TypeRefPtr> Parser::parseReturnTypes() {
@@ -575,14 +749,24 @@ TypeRefPtr Parser::parseBaseType() {
             type_ref::FuncType{std::move(paramTypes), std::move(ret)}, location});
     }
 
-    // Named type (possibly qualified with ::)
+    // Named type (possibly qualified with ::, possibly generic with <Args>)
     if (check(TokenKind::Ident)) {
         auto name = advance().text;
         if (match(TokenKind::ColonColon)) {
             auto member = expect(TokenKind::Ident, "expected type name after '::'").text;
-            return makeTypeRef<type_ref::Qualified>(location, name, member);
+            auto base = makeTypeRef<type_ref::Qualified>(location, name, member);
+            if (check(TokenKind::Less)) {
+                auto args = parseTypeArgs();
+                return makeTypeRef<type_ref::Generic>(location, std::move(base), std::move(args));
+            }
+            return base;
         }
-        return makeTypeRef<type_ref::Named>(location, name);
+        auto base = makeTypeRef<type_ref::Named>(location, name);
+        if (check(TokenKind::Less)) {
+            auto args = parseTypeArgs();
+            return makeTypeRef<type_ref::Generic>(location, std::move(base), std::move(args));
+        }
+        return base;
     }
 
     diag_.error(location, "expected type, got '" + peek().text + "'");
@@ -1181,6 +1365,42 @@ ExprPtr Parser::parsePostfix() {
                         expr::Index{std::move(result), std::move(index)}, idxLoc});
                 }
             }
+        } else if (check(TokenKind::Less) &&
+                   (std::holds_alternative<expr::Ident>(result->kind) ||
+                    std::holds_alternative<expr::ScopeAccess>(result->kind)) &&
+                   looksLikeTypeArgs()) {
+            // Possible generic: Type<Args>{...} or Func<Args>(...)
+            // Lookahead to confirm: parse type args, then check for { or (
+            auto savedPos = pos_;
+            bool savedPG = pendingGreater_;
+            auto litLoc = result->loc;
+
+            auto args = parseTypeArgs();
+            if (check(TokenKind::LBrace) && compositeLitOk_) {
+                // Generic composite literal: Type<Args>{...}
+                TypeRefPtr base;
+                if (auto* ident = std::get_if<expr::Ident>(&result->kind)) {
+                    base = makeTypeRef<type_ref::Named>(litLoc, ident->name);
+                } else if (auto* scope = std::get_if<expr::ScopeAccess>(&result->kind)) {
+                    base = makeTypeRef<type_ref::Qualified>(litLoc, scope->scope, scope->member);
+                }
+                auto typeRef = makeTypeRef<type_ref::Generic>(litLoc, std::move(base), std::move(args));
+                result = parseCompositeLitBody(std::move(typeRef), litLoc);
+            } else if (check(TokenKind::LParen)) {
+                // Generic function call: Func<Args>(...)
+                // Type args are discarded from AST for now (Go infers them),
+                // but we need to consume them. For codegen, we need to pass them.
+                // Build the call with type args as an Index node? No — simplest:
+                // just consume and proceed to call. Type args dropped for now.
+                auto callArgs = parseArgList();
+                result = std::make_unique<Expr>(Expr{
+                    expr::Call{std::move(result), std::move(callArgs)}, litLoc});
+            } else {
+                // Not a generic expression — backtrack
+                pos_ = savedPos;
+                pendingGreater_ = savedPG;
+                break;
+            }
         } else if (check(TokenKind::LBrace) && compositeLitOk_) {
             // Composite literal: Type{...}
             // Only if the result looks like a type (Ident or ScopeAccess)
@@ -1189,8 +1409,8 @@ ExprPtr Parser::parsePostfix() {
             if (isTypeLike) {
                 auto litLoc = result->loc;
                 TypeRefPtr typeRef;
-                if (auto* ident = std::get_if<expr::Ident>(&result->kind)) {
-                    typeRef = makeTypeRef<type_ref::Named>(litLoc, ident->name);
+                if (auto* identV = std::get_if<expr::Ident>(&result->kind)) {
+                    typeRef = makeTypeRef<type_ref::Named>(litLoc, identV->name);
                 } else if (auto* scope = std::get_if<expr::ScopeAccess>(&result->kind)) {
                     typeRef = makeTypeRef<type_ref::Qualified>(litLoc, scope->scope, scope->member);
                 }

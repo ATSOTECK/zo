@@ -110,6 +110,21 @@ bool GoCodegen::isUnionType(const std::string& name) const {
     return false;
 }
 
+void GoCodegen::emitTypeParams(const std::vector<TypeParam>& params) {
+    if (params.empty()) return;
+    write("[");
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) write(", ");
+        write(params[i].name + " ");
+        if (params[i].constraint.has_value()) {
+            write(params[i].constraint.value());
+        } else {
+            write("any");
+        }
+    }
+    write("]");
+}
+
 void GoCodegen::emitDecl(const Decl& decl) {
     std::visit([this](const auto& d) {
         using T = std::decay_t<decltype(d)>;
@@ -131,7 +146,10 @@ void GoCodegen::emitDecl(const Decl& decl) {
             write("\n");
         }
         else if constexpr (std::is_same_v<T, decl::Struct>) {
-            writeln("type " + d.name + " struct {");
+            writeIndent();
+            write("type " + d.name);
+            emitTypeParams(d.type_params);
+            write(" struct {\n");
             indent();
             for (const auto& field : d.fields) {
                 writeIndent();
@@ -168,8 +186,23 @@ void GoCodegen::emitDecl(const Decl& decl) {
             for (const auto& e : enums_) {
                 if (e.name == d.target) { isEnum = true; break; }
             }
+            // Build receiver string with type args for generics
+            std::string receiver = d.target;
+            if (!d.target_type_args.empty()) {
+                receiver += "[";
+                for (size_t i = 0; i < d.target_type_args.size(); ++i) {
+                    if (i > 0) receiver += ", ";
+                    receiver += d.target_type_args[i];
+                }
+                receiver += "]";
+            }
             for (const auto& method : d.methods) {
-                emitFunc(method, d.target, isEnum);
+                // Emit impl-level type params on each method
+                if (!d.type_params.empty()) {
+                    // For generic impl blocks, we emit type params on the receiver
+                    // The method itself doesn't get separate type params from the impl
+                }
+                emitFunc(method, receiver, isEnum);
                 write("\n");
             }
             if (d.interface_name.has_value()) {
@@ -188,6 +221,15 @@ void GoCodegen::emitDecl(const Decl& decl) {
         }
         else if constexpr (std::is_same_v<T, decl::Union>) {
             emitUnion(d);
+        }
+        else if constexpr (std::is_same_v<T, decl::Constraint>) {
+            writeIndent();
+            write("type " + d.name + " interface { ");
+            for (size_t i = 0; i < d.types.size(); ++i) {
+                if (i > 0) write(" | ");
+                emitTypeRef(*d.types[i]);
+            }
+            write(" }\n\n");
         }
     }, decl.kind);
 }
@@ -222,7 +264,9 @@ void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool
         }
     }
 
-    write(fn.name + "(");
+    write(fn.name);
+    emitTypeParams(fn.type_params);
+    write("(");
     for (size_t i = 0; i < fn.params.size(); ++i) {
         if (i > 0) write(", ");
         write(fn.params[i].name + " ");
@@ -1089,11 +1133,20 @@ void GoCodegen::emitTypeRef(const TypeRef& type) {
                 }
             }
         }
+        else if constexpr (std::is_same_v<T, type_ref::Generic>) {
+            emitTypeRef(*t.base);
+            write("[");
+            for (size_t i = 0; i < t.args.size(); ++i) {
+                if (i > 0) write(", ");
+                emitTypeRef(*t.args[i]);
+            }
+            write("]");
+        }
     }, type.kind);
 }
 
 std::string GoCodegen::zeroValueForType(const TypeRef& type) {
-    return std::visit([this](const auto& t) -> std::string {
+    return std::visit([this, &type](const auto& t) -> std::string {
         using T = std::decay_t<decltype(t)>;
         if constexpr (std::is_same_v<T, type_ref::Named>) {
             if (t.name == "string") return "\"\"";
@@ -1124,6 +1177,9 @@ std::string GoCodegen::zeroValueForType(const TypeRef& type) {
         if constexpr (std::is_same_v<T, type_ref::Result>) {
             // Shouldn't normally happen directly
             return zeroValueForType(*t.inner);
+        }
+        if constexpr (std::is_same_v<T, type_ref::Generic>) {
+            return typeRefToString(type) + "{}";
         }
         return "nil";
     }, type.kind);

@@ -111,6 +111,9 @@ void TypeChecker::registerDecl(const Decl& decl) {
             }
             unionTypes_[d.name] = std::move(meta);
         }
+        else if constexpr (std::is_same_v<T, decl::Constraint>) {
+            symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
+        }
     }, decl.kind);
 }
 
@@ -131,6 +134,16 @@ void TypeChecker::checkDecl(const Decl& decl) {
                 if (v.value.has_value()) {
                     checkExpr(**v.value);
                 }
+            }
+        }
+        else if constexpr (std::is_same_v<T, decl::Struct>) {
+            // Register type params for generic structs
+            if (!d.type_params.empty()) {
+                symbols_.enterScope();
+                for (const auto& tp : d.type_params) {
+                    symbols_.define(tp.name, Symbol{tp.name, SymbolKind::Type, tp.loc, "type_param"});
+                }
+                symbols_.exitScope();
             }
         }
         else if constexpr (std::is_same_v<T, decl::Union>) {
@@ -154,16 +167,35 @@ void TypeChecker::checkDecl(const Decl& decl) {
                         "interface '" + d.interface_name.value() + "' is not defined");
                 }
             }
+            // Register impl-level type params before checking methods
+            symbols_.enterScope();
+            for (const auto& tp : d.type_params) {
+                symbols_.define(tp.name, Symbol{tp.name, SymbolKind::Type, tp.loc, "type_param"});
+            }
             // Check each method
             for (const auto& method : d.methods) {
                 checkFunc(method);
             }
+            symbols_.exitScope();
+        }
+        else if constexpr (std::is_same_v<T, decl::Constraint>) {
+            // Already registered in registerDecl
         }
     }, decl.kind);
 }
 
 void TypeChecker::checkFunc(const decl::Func& fn) {
     symbols_.enterScope();
+
+    // Register type parameters as types in scope
+    for (const auto& tp : fn.type_params) {
+        symbols_.define(tp.name, Symbol{tp.name, SymbolKind::Type, tp.loc, "type_param"});
+        if (tp.constraint.has_value()) {
+            if (!symbols_.lookup(tp.constraint.value())) {
+                diag_.error(tp.loc, "undeclared constraint '" + tp.constraint.value() + "'");
+            }
+        }
+    }
 
     // Detect T! return type
     bool prevInResult = inResultFunc_;

@@ -40,6 +40,7 @@ namespace type_ref {
         std::vector<TypeRefPtr> params;
         std::vector<TypeRefPtr> returns;
     };
+    struct Generic { TypeRefPtr base; std::vector<TypeRefPtr> args; };
 }
 
 using TypeRefKind = std::variant<
@@ -52,7 +53,8 @@ using TypeRefKind = std::variant<
     type_ref::Channel,
     type_ref::Result,
     type_ref::Optional,
-    type_ref::FuncType
+    type_ref::FuncType,
+    type_ref::Generic
 >;
 
 struct TypeRef {
@@ -71,6 +73,12 @@ struct Field {
 struct Param {
     std::string name;
     TypeRefPtr type;
+    SourceLocation loc;
+};
+
+struct TypeParam {
+    std::string name;
+    std::optional<std::string> constraint;  // nullopt → "any"
     SourceLocation loc;
 };
 
@@ -261,6 +269,7 @@ namespace decl {
 
     struct Func {
         std::string name;
+        std::vector<TypeParam> type_params;
         std::vector<Param> params;
         std::vector<TypeRefPtr> returns;  // empty = void
         std::vector<StmtPtr> body;
@@ -268,6 +277,7 @@ namespace decl {
 
     struct Struct {
         std::string name;
+        std::vector<TypeParam> type_params;
         std::vector<Field> fields;
     };
 
@@ -278,6 +288,8 @@ namespace decl {
 
     struct ImplBlock {
         std::string target;
+        std::vector<TypeParam> type_params;
+        std::vector<std::string> target_type_args;
         std::optional<std::string> interface_name;  // for "impl T implements I"
         std::vector<Func> methods;
     };
@@ -297,6 +309,11 @@ namespace decl {
         std::string name;
         std::vector<UnionVariantDef> variants;
     };
+
+    struct Constraint {
+        std::string name;
+        std::vector<TypeRefPtr> types;
+    };
 }
 
 using DeclKind = std::variant<
@@ -308,7 +325,8 @@ using DeclKind = std::variant<
     decl::ImplBlock,
     decl::TypeAlias,
     decl::Enum,
-    decl::Union
+    decl::Union,
+    decl::Constraint
 >;
 
 struct Decl {

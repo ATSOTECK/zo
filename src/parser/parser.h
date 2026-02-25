@@ -46,6 +46,9 @@ private:
     TypeRefPtr parseType();
     TypeRefPtr parseBaseType();
     std::vector<TypeRefPtr> parseReturnTypes();
+    std::vector<TypeParam> parseTypeParams();
+    std::vector<TypeRefPtr> parseTypeArgs();
+    bool looksLikeTypeArgs() const;
 
     // Statements
     StmtPtr parseStmt();
@@ -79,6 +82,7 @@ private:
     DiagnosticEngine& diag_;
     size_t pos_ = 0;
     bool compositeLitOk_ = true;
+    bool pendingGreater_ = false;
 };
 
 } // namespace zo
