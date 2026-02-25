@@ -15,7 +15,18 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 include_directories(${PROJECT_SOURCE_DIR}/inc)
 link_directories(${PROJECT_SOURCE_DIR}/lib)
 
-add_executable(zo src/main.cpp)
+add_executable(zo
+    src/main.cpp
+    src/common/diagnostics.cpp
+    src/lexer/token.cpp
+    src/lexer/lexer.cpp
+    src/parser/parser.cpp
+    src/codegen/go_codegen.cpp
+    src/sema/symbol_table.cpp
+    src/sema/type_checker.cpp
+    src/driver/compiler.cpp
+    src/driver/project.cpp
+)
 
 target_link_libraries(zo ${LIBGIT2_TARGET})
 
