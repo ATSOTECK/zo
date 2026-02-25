@@ -193,6 +193,24 @@ void GoCodegen::emitDecl(const Decl& decl) {
 }
 
 void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool valueReceiver) {
+    // Save/restore result-function state
+    bool prevInResult = inResultFunc_;
+    const std::vector<TypeRefPtr>* prevReturns = currentReturns_;
+    int prevTry = tryCounter_;
+    int prevElse = elseCounter_;
+
+    // Detect if the function returns T! (Result type)
+    inResultFunc_ = false;
+    currentReturns_ = &fn.returns;
+    tryCounter_ = 0;
+    elseCounter_ = 0;
+    for (const auto& ret : fn.returns) {
+        if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+            inResultFunc_ = true;
+            break;
+        }
+    }
+
     writeIndent();
     write("func ");
 
@@ -216,6 +234,10 @@ void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool
 
     if (fn.body.empty() && fn.returns.empty()) {
         write("\n");
+        inResultFunc_ = prevInResult;
+        currentReturns_ = prevReturns;
+        tryCounter_ = prevTry;
+        elseCounter_ = prevElse;
         return;
     }
 
@@ -226,6 +248,12 @@ void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool
     }
     dedent();
     writeln("}");
+
+    // Restore
+    inResultFunc_ = prevInResult;
+    currentReturns_ = prevReturns;
+    tryCounter_ = prevTry;
+    elseCounter_ = prevElse;
 }
 
 void GoCodegen::emitReturnTypes(const std::vector<TypeRefPtr>& returns) {
@@ -248,36 +276,210 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
         using T = std::decay_t<decltype(s)>;
 
         if constexpr (std::is_same_v<T, stmt::ExprStmt>) {
+            // Handle ShortDecl with try: x := try foo()
+            if (auto* sd = std::get_if<expr::ShortDecl>(&s.expr->kind)) {
+                if (sd->value && containsTry(*sd->value)) {
+                    auto* tryExpr = std::get_if<expr::Try>(&sd->value->kind);
+                    if (tryExpr) {
+                        int n = tryCounter_++;
+                        std::string errVar = "__err" + std::to_string(n);
+                        // x, __errN := operand
+                        writeIndent();
+                        for (size_t i = 0; i < sd->names.size(); ++i) {
+                            if (i > 0) write(", ");
+                            write(sd->names[i]);
+                        }
+                        write(", " + errVar + " := ");
+                        emitExpr(*tryExpr->operand);
+                        write("\n");
+                        // if __errN != nil { return zero, __errN }
+                        writeln("if " + errVar + " != nil {");
+                        indent();
+                        writeIndent();
+                        write("return ");
+                        if (currentReturns_) {
+                            for (size_t i = 0; i < currentReturns_->size(); ++i) {
+                                if (i > 0) write(", ");
+                                auto& ret = (*currentReturns_)[i];
+                                if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                                    auto& inner = std::get<type_ref::Result>(ret->kind).inner;
+                                    write(zeroValueForType(*inner) + ", " + errVar);
+                                } else {
+                                    write(zeroValueForType(*ret));
+                                }
+                            }
+                        }
+                        write("\n");
+                        dedent();
+                        writeln("}");
+                        return;
+                    }
+                }
+            }
+            // Handle bare try: try foo()
+            if (containsTry(*s.expr)) {
+                auto* tryExpr = std::get_if<expr::Try>(&s.expr->kind);
+                if (tryExpr) {
+                    int n = tryCounter_++;
+                    std::string errVar = "__err" + std::to_string(n);
+                    writeIndent();
+                    write("_, " + errVar + " := ");
+                    emitExpr(*tryExpr->operand);
+                    write("\n");
+                    writeln("if " + errVar + " != nil {");
+                    indent();
+                    writeIndent();
+                    write("return ");
+                    if (currentReturns_) {
+                        for (size_t i = 0; i < currentReturns_->size(); ++i) {
+                            if (i > 0) write(", ");
+                            auto& ret = (*currentReturns_)[i];
+                            if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                                auto& inner = std::get<type_ref::Result>(ret->kind).inner;
+                                write(zeroValueForType(*inner) + ", " + errVar);
+                            } else {
+                                write(zeroValueForType(*ret));
+                            }
+                        }
+                    }
+                    write("\n");
+                    dedent();
+                    writeln("}");
+                    return;
+                }
+            }
+            // Handle ShortDecl with else: x := getOpt() else default
+            if (auto* sd = std::get_if<expr::ShortDecl>(&s.expr->kind)) {
+                if (sd->value && std::holds_alternative<expr::Else>(sd->value->kind)) {
+                    auto& elseExpr = std::get<expr::Else>(sd->value->kind);
+                    int n = elseCounter_++;
+                    std::string optVar = "__opt" + std::to_string(n);
+                    // __optN := value
+                    writeIndent();
+                    write(optVar + " := ");
+                    emitExpr(*elseExpr.value);
+                    write("\n");
+                    // x := fallback
+                    writeIndent();
+                    write(sd->names[0] + " := ");
+                    emitExpr(*elseExpr.fallback);
+                    write("\n");
+                    // if __optN != nil { x = *__optN }
+                    writeln("if " + optVar + " != nil {");
+                    indent();
+                    writeln(sd->names[0] + " = *" + optVar);
+                    dedent();
+                    writeln("}");
+                    return;
+                }
+            }
             writeIndent();
             emitExpr(*s.expr);
             write("\n");
         }
         else if constexpr (std::is_same_v<T, stmt::Return>) {
-            writeIndent();
-            write("return");
-            for (size_t i = 0; i < s.values.size(); ++i) {
-                write(i == 0 ? " " : ", ");
-                emitExpr(*s.values[i]);
+            if (inResultFunc_) {
+                // Check if any return value contains try
+                bool hasTry = false;
+                for (const auto& val : s.values) {
+                    if (containsTry(*val)) { hasTry = true; break; }
+                }
+                if (hasTry && s.values.size() == 1) {
+                    // return try foo() → extract try, then return val, nil
+                    auto* tryExpr = std::get_if<expr::Try>(&s.values[0]->kind);
+                    if (tryExpr) {
+                        int n = tryCounter_++;
+                        std::string tryVar = "__try" + std::to_string(n);
+                        std::string errVar = "__err" + std::to_string(n);
+                        writeIndent();
+                        write(tryVar + ", " + errVar + " := ");
+                        emitExpr(*tryExpr->operand);
+                        write("\n");
+                        writeln("if " + errVar + " != nil {");
+                        indent();
+                        writeIndent();
+                        write("return ");
+                        if (currentReturns_) {
+                            for (size_t i = 0; i < currentReturns_->size(); ++i) {
+                                if (i > 0) write(", ");
+                                auto& ret = (*currentReturns_)[i];
+                                if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+                                    auto& inner = std::get<type_ref::Result>(ret->kind).inner;
+                                    write(zeroValueForType(*inner) + ", " + errVar);
+                                } else {
+                                    write(zeroValueForType(*ret));
+                                }
+                            }
+                        }
+                        write("\n");
+                        dedent();
+                        writeln("}");
+                        writeIndent();
+                        write("return " + tryVar + ", nil\n");
+                        return;
+                    }
+                }
+                // Auto-append nil: return val → return val, nil
+                writeIndent();
+                write("return");
+                for (size_t i = 0; i < s.values.size(); ++i) {
+                    write(i == 0 ? " " : ", ");
+                    emitExpr(*s.values[i]);
+                }
+                write(", nil\n");
+            } else {
+                writeIndent();
+                write("return");
+                for (size_t i = 0; i < s.values.size(); ++i) {
+                    write(i == 0 ? " " : ", ");
+                    emitExpr(*s.values[i]);
+                }
+                write("\n");
             }
-            write("\n");
         }
         else if constexpr (std::is_same_v<T, stmt::VarDecl>) {
-            writeIndent();
-            if (s.init.has_value()) {
+            // Handle var x T = getOpt() else default
+            if (s.init.has_value() && std::holds_alternative<expr::Else>((*s.init)->kind)) {
+                auto& elseExpr = std::get<expr::Else>((*s.init)->kind);
+                int n = elseCounter_++;
+                std::string optVar = "__opt" + std::to_string(n);
+                writeIndent();
+                write(optVar + " := ");
+                emitExpr(*elseExpr.value);
+                write("\n");
+                writeIndent();
                 if (s.type.has_value()) {
                     write("var " + s.name + " ");
                     emitTypeRef(**s.type);
                     write(" = ");
-                    emitExpr(**s.init);
                 } else {
-                    write("var " + s.name + " = ");
-                    emitExpr(**s.init);
+                    write(s.name + " := ");
                 }
-            } else if (s.type.has_value()) {
-                write("var " + s.name + " ");
-                emitTypeRef(**s.type);
+                emitExpr(*elseExpr.fallback);
+                write("\n");
+                writeln("if " + optVar + " != nil {");
+                indent();
+                writeln(s.name + " = *" + optVar);
+                dedent();
+                writeln("}");
+            } else {
+                writeIndent();
+                if (s.init.has_value()) {
+                    if (s.type.has_value()) {
+                        write("var " + s.name + " ");
+                        emitTypeRef(**s.type);
+                        write(" = ");
+                        emitExpr(**s.init);
+                    } else {
+                        write("var " + s.name + " = ");
+                        emitExpr(**s.init);
+                    }
+                } else if (s.type.has_value()) {
+                    write("var " + s.name + " ");
+                    emitTypeRef(**s.type);
+                }
+                write("\n");
             }
-            write("\n");
         }
         else if constexpr (std::is_same_v<T, stmt::ConstDecl>) {
             writeIndent();
@@ -620,6 +822,16 @@ void GoCodegen::emitExpr(const Expr& expr) {
         else if constexpr (std::is_same_v<T, expr::UnionVariant>) {
             write(resolveEnumVariant(e.variant, e.type_name));
         }
+        else if constexpr (std::is_same_v<T, expr::Try>) {
+            // Fallback: try in expression position emits just the operand
+            // (statement-level try is handled in emitStmt)
+            emitExpr(*e.operand);
+        }
+        else if constexpr (std::is_same_v<T, expr::Else>) {
+            // Fallback: else in expression position emits just the value
+            // (statement-level else is handled in emitStmt)
+            emitExpr(*e.value);
+        }
     }, expr.kind);
 }
 
@@ -878,6 +1090,56 @@ void GoCodegen::emitTypeRef(const TypeRef& type) {
             }
         }
     }, type.kind);
+}
+
+std::string GoCodegen::zeroValueForType(const TypeRef& type) {
+    return std::visit([this](const auto& t) -> std::string {
+        using T = std::decay_t<decltype(t)>;
+        if constexpr (std::is_same_v<T, type_ref::Named>) {
+            if (t.name == "string") return "\"\"";
+            if (t.name == "bool") return "false";
+            if (t.name == "int" || t.name == "uint" ||
+                t.name == "s8" || t.name == "s16" || t.name == "s32" || t.name == "s64" ||
+                t.name == "u8" || t.name == "u16" || t.name == "u32" || t.name == "u64" ||
+                t.name == "f32" || t.name == "f64" ||
+                t.name == "byte" || t.name == "rune") return "0";
+            if (t.name == "error") return "nil";
+            // Struct types: use zero value
+            return t.name + "{}";
+        }
+        if constexpr (std::is_same_v<T, type_ref::Qualified>) {
+            return t.pkg + "." + t.name + "{}";
+        }
+        if constexpr (std::is_same_v<T, type_ref::Pointer> ||
+                       std::is_same_v<T, type_ref::Slice> ||
+                       std::is_same_v<T, type_ref::MapType> ||
+                       std::is_same_v<T, type_ref::Channel> ||
+                       std::is_same_v<T, type_ref::Optional> ||
+                       std::is_same_v<T, type_ref::FuncType>) {
+            return "nil";
+        }
+        if constexpr (std::is_same_v<T, type_ref::Array>) {
+            return "{}"; // simplified
+        }
+        if constexpr (std::is_same_v<T, type_ref::Result>) {
+            // Shouldn't normally happen directly
+            return zeroValueForType(*t.inner);
+        }
+        return "nil";
+    }, type.kind);
+}
+
+bool GoCodegen::containsTry(const Expr& expr) {
+    return std::holds_alternative<expr::Try>(expr.kind);
+}
+
+std::string GoCodegen::typeRefToString(const TypeRef& type) {
+    std::ostringstream tmp;
+    std::swap(tmp, out_);
+    emitTypeRef(type);
+    std::string result = out_.str();
+    std::swap(tmp, out_);
+    return result;
 }
 
 } // namespace zo

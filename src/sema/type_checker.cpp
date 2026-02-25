@@ -165,6 +165,16 @@ void TypeChecker::checkDecl(const Decl& decl) {
 void TypeChecker::checkFunc(const decl::Func& fn) {
     symbols_.enterScope();
 
+    // Detect T! return type
+    bool prevInResult = inResultFunc_;
+    inResultFunc_ = false;
+    for (const auto& ret : fn.returns) {
+        if (std::holds_alternative<type_ref::Result>(ret->kind)) {
+            inResultFunc_ = true;
+            break;
+        }
+    }
+
     // Register parameters
     for (const auto& param : fn.params) {
         symbols_.define(param.name, Symbol{param.name, SymbolKind::Variable, param.loc, "param"});
@@ -173,6 +183,7 @@ void TypeChecker::checkFunc(const decl::Func& fn) {
     // Check body
     checkBlock(fn.body);
 
+    inResultFunc_ = prevInResult;
     symbols_.exitScope();
 }
 
@@ -367,6 +378,16 @@ void TypeChecker::checkExpr(const Expr& expr) {
         }
         else if constexpr (std::is_same_v<T, expr::UnionVariant>) {
             // Union variant patterns — validated in match context
+        }
+        else if constexpr (std::is_same_v<T, expr::Try>) {
+            checkExpr(*e.operand);
+            if (!inResultFunc_) {
+                diag_.warning(expr.loc, "'try' used outside of a function returning T!");
+            }
+        }
+        else if constexpr (std::is_same_v<T, expr::Else>) {
+            checkExpr(*e.value);
+            checkExpr(*e.fallback);
         }
         // Literals (StringLit, IntLit, FloatLit, BoolLit, NilLit, This) — nothing to check
     }, expr.kind);

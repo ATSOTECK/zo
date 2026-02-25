@@ -113,6 +113,8 @@ namespace expr {
         std::string variant;
         std::vector<std::string> bindings;  // destructured variable names
     };
+    struct Try  { ExprPtr operand; };                   // try expr
+    struct Else { ExprPtr value; ExprPtr fallback; };   // expr else default
 }
 
 using ExprKind = std::variant<
@@ -137,7 +139,9 @@ using ExprKind = std::variant<
     expr::SliceExpr,
     expr::TypeAssert,
     expr::EnumVariant,
-    expr::UnionVariant
+    expr::UnionVariant,
+    expr::Try,
+    expr::Else
 >;
 
 struct Expr {

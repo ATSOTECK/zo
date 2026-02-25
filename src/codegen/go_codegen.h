@@ -31,6 +31,9 @@ private:
     std::string mapType(const std::string& zoType) const;
     std::string resolveEnumVariant(const std::string& variant, const std::optional<std::string>& typeName) const;
     bool isUnionType(const std::string& name) const;
+    std::string zeroValueForType(const TypeRef& type);
+    bool containsTry(const Expr& expr);
+    std::string typeRefToString(const TypeRef& type);
 
     void indent();
     void dedent();
@@ -41,6 +44,12 @@ private:
     std::ostringstream out_;
     DiagnosticEngine& diag_;
     int indentLevel_ = 0;
+
+    // Result function tracking (T! returns)
+    bool inResultFunc_ = false;
+    const std::vector<TypeRefPtr>* currentReturns_ = nullptr;
+    int tryCounter_ = 0;
+    int elseCounter_ = 0;
 
     struct EnumInfo {
         std::string name;

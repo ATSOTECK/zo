@@ -25,6 +25,7 @@ private:
     DiagnosticEngine& diag_;
     SymbolTable symbols_;
     std::string currentPackage_;
+    bool inResultFunc_ = false;
 
     struct EnumMeta {
         std::string name;

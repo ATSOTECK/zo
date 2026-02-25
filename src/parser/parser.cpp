@@ -1100,6 +1100,12 @@ ExprPtr Parser::parseMultiplication() {
 }
 
 ExprPtr Parser::parseUnary() {
+    // try expression: try callExpr
+    if (check(TokenKind::Try)) {
+        auto opLoc = loc(); advance();
+        auto operand = parseUnary();
+        return makeExpr<expr::Try>(opLoc, std::move(operand));
+    }
     if (check(TokenKind::Minus) || check(TokenKind::Bang) ||
         check(TokenKind::Star) || check(TokenKind::Ampersand)) {
         auto opLoc = loc();
@@ -1192,6 +1198,11 @@ ExprPtr Parser::parsePostfix() {
             } else {
                 break;
             }
+        } else if (check(TokenKind::Else)) {
+            // Optional unwrap: expr else fallback
+            auto elseLoc = loc(); advance();
+            auto fallback = parseUnary();
+            result = makeExpr<expr::Else>(elseLoc, std::move(result), std::move(fallback));
         } else {
             break;
         }
