@@ -55,7 +55,6 @@ private:
     StmtPtr parseConstDecl();
     StmtPtr parseIf();
     StmtPtr parseFor();
-    StmtPtr parseSwitch();
     StmtPtr parseSelect();
     StmtPtr parseSimpleStmt();
 

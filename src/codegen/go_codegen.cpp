@@ -361,34 +361,6 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
             dedent();
             writeln("}");
         }
-        else if constexpr (std::is_same_v<T, stmt::Switch>) {
-            writeIndent();
-            write("switch ");
-            if (s.tag.has_value()) {
-                emitExpr(**s.tag);
-                write(" ");
-            }
-            write("{\n");
-            for (const auto& c : s.cases) {
-                writeIndent();
-                if (c.values.empty()) {
-                    write("default:\n");
-                } else {
-                    write("case ");
-                    for (size_t i = 0; i < c.values.size(); ++i) {
-                        if (i > 0) write(", ");
-                        emitExpr(*c.values[i]);
-                    }
-                    write(":\n");
-                }
-                indent();
-                for (const auto& bodyStmt : c.body) {
-                    emitStmt(*bodyStmt);
-                }
-                dedent();
-            }
-            writeln("}");
-        }
         else if constexpr (std::is_same_v<T, stmt::Match>) {
             emitMatch(s);
         }

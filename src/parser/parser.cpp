@@ -422,14 +422,34 @@ StmtPtr Parser::parseMatch() {
         expect(TokenKind::Colon, "expected ':' after match pattern");
 
         // Parse body statements until next pattern or }
-        // A new pattern starts with: . _ Ident(followed by .) or is a literal at the start of line
         std::vector<StmtPtr> body;
         while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
             // Check if this looks like a new arm
+            // .Variant pattern
             if (check(TokenKind::Dot) && peekNext().kind == TokenKind::Ident) break;
+            // _ wildcard pattern
             if (check(TokenKind::Ident) && peek().text == "_" &&
                 (peekNext().kind == TokenKind::Colon || peekNext().kind == TokenKind::Comma)) break;
+            // Type.Variant pattern
             if (check(TokenKind::Ident) && peekNext().kind == TokenKind::Dot) break;
+            // Literal pattern: scan ahead for : at depth 0
+            if (check(TokenKind::IntLit) || check(TokenKind::FloatLit) ||
+                check(TokenKind::StringLit) || check(TokenKind::True) ||
+                check(TokenKind::False) || check(TokenKind::Nil)) {
+                // Lookahead: check if we see pattern , pattern : or pattern :
+                size_t savedScan = pos_;
+                bool looksLikeArm = false;
+                int depth = 0;
+                while (savedScan < tokens_.size()) {
+                    auto k = tokens_[savedScan].kind;
+                    if (k == TokenKind::LParen || k == TokenKind::LBracket) { depth++; savedScan++; continue; }
+                    if (k == TokenKind::RParen || k == TokenKind::RBracket) { depth--; savedScan++; continue; }
+                    if (depth == 0 && k == TokenKind::Colon) { looksLikeArm = true; break; }
+                    if (k == TokenKind::Semicolon || k == TokenKind::LBrace || k == TokenKind::RBrace) break;
+                    savedScan++;
+                }
+                if (looksLikeArm) break;
+            }
 
             if (match(TokenKind::Semicolon)) continue;
             body.push_back(parseStmt());
@@ -592,7 +612,6 @@ StmtPtr Parser::parseStmt() {
     if (check(TokenKind::Const))       return parseConstDecl();
     if (check(TokenKind::If))          return parseIf();
     if (check(TokenKind::For))         return parseFor();
-    if (check(TokenKind::Switch))      return parseSwitch();
     if (check(TokenKind::Select))      return parseSelect();
     if (check(TokenKind::Match))       return parseMatch();
     if (check(TokenKind::Break)) {
@@ -847,54 +866,6 @@ StmtPtr Parser::parseFor() {
     return makeStmt<stmt::For>(location, std::move(init), std::move(cond), std::move(post), std::move(body));
 }
 
-StmtPtr Parser::parseSwitch() {
-    auto location = loc();
-    expect(TokenKind::Switch, "expected 'switch'");
-
-    std::optional<ExprPtr> tag;
-    if (!check(TokenKind::LBrace)) {
-        auto savedCL = compositeLitOk_;
-        compositeLitOk_ = false;
-        tag = parseExpr();
-        compositeLitOk_ = savedCL;
-    }
-
-    expect(TokenKind::LBrace, "expected '{'");
-
-    std::vector<SwitchCase> cases;
-    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
-        if (match(TokenKind::Semicolon)) continue;
-
-        std::vector<ExprPtr> values;
-        if (match(TokenKind::Case)) {
-            // Parse comma-separated case values
-            values.push_back(parseExpr());
-            while (match(TokenKind::Comma)) {
-                values.push_back(parseExpr());
-            }
-        } else {
-            expect(TokenKind::Default, "expected 'case' or 'default'");
-        }
-
-        expect(TokenKind::Colon, "expected ':'");
-
-        // Parse body statements until next case/default/}
-        std::vector<StmtPtr> body;
-        while (!check(TokenKind::Case) && !check(TokenKind::Default) &&
-               !check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
-            if (match(TokenKind::Semicolon)) continue;
-            body.push_back(parseStmt());
-        }
-
-        cases.push_back(SwitchCase{std::move(values), std::move(body)});
-    }
-
-    expect(TokenKind::RBrace, "expected '}'");
-    expectSemicolon();
-
-    return makeStmt<stmt::Switch>(location, std::move(tag), std::move(cases));
-}
-
 StmtPtr Parser::parseSelect() {
     auto location = loc();
     expect(TokenKind::Select, "expected 'select'");
@@ -905,8 +876,15 @@ StmtPtr Parser::parseSelect() {
         if (match(TokenKind::Semicolon)) continue;
 
         std::optional<StmtPtr> comm;
-        if (match(TokenKind::Case)) {
-            // Parse the communication clause (ends with : not ;)
+
+        // Default arm: _ :
+        if (check(TokenKind::Ident) && peek().text == "_" &&
+            peekNext().kind == TokenKind::Colon) {
+            advance(); // consume _
+            expect(TokenKind::Colon, "expected ':'");
+            // comm stays nullopt = default
+        } else {
+            // Communication clause (ends with : not ;)
             auto commLoc = loc();
             auto commExpr = parseExpr();
 
@@ -955,15 +933,20 @@ StmtPtr Parser::parseSelect() {
             }
 
             expect(TokenKind::Colon, "expected ':'");
-        } else {
-            expect(TokenKind::Default, "expected 'case' or 'default'");
-            expect(TokenKind::Colon, "expected ':'");
         }
 
-        // Parse body statements
+        // Parse body statements until next arm or }
         std::vector<StmtPtr> body;
-        while (!check(TokenKind::Case) && !check(TokenKind::Default) &&
-               !check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+            // Peek ahead: if this looks like a new select arm, stop
+            // New arm: _ followed by :, or <-expr, or ident followed by comm ops
+            if (check(TokenKind::Ident) && peek().text == "_" &&
+                peekNext().kind == TokenKind::Colon) break;
+            if (check(TokenKind::Arrow)) break;  // <-ch arm
+            if (check(TokenKind::Ident) && (peekNext().kind == TokenKind::Arrow ||
+                peekNext().kind == TokenKind::ColonAssign ||
+                peekNext().kind == TokenKind::Comma ||
+                peekNext().kind == TokenKind::Assign)) break;
             if (match(TokenKind::Semicolon)) continue;
             body.push_back(parseStmt());
         }

@@ -153,11 +153,6 @@ struct MatchArm {
     SourceLocation loc;
 };
 
-struct SwitchCase {
-    std::vector<ExprPtr> values;    // empty = default case
-    std::vector<StmtPtr> body;
-};
-
 struct SelectCase {
     std::optional<StmtPtr> comm;    // nullopt = default case
     std::vector<StmtPtr> body;
@@ -195,10 +190,6 @@ namespace stmt {
         ExprPtr iterable;
         std::unique_ptr<stmt::Block> body;
     };
-    struct Switch     {
-        std::optional<ExprPtr> tag;
-        std::vector<SwitchCase> cases;
-    };
     struct Select     {
         std::vector<SelectCase> cases;
     };
@@ -224,7 +215,6 @@ using StmtKind = std::variant<
     stmt::If,
     stmt::For,
     stmt::ForRange,
-    stmt::Switch,
     stmt::Select,
     stmt::Match,
     stmt::Send,

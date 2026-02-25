@@ -236,17 +236,6 @@ void TypeChecker::checkStmt(const Stmt& stmt) {
             checkBlock(s.body->stmts);
             symbols_.exitScope();
         }
-        else if constexpr (std::is_same_v<T, stmt::Switch>) {
-            if (s.tag.has_value()) checkExpr(**s.tag);
-            for (const auto& c : s.cases) {
-                for (const auto& val : c.values) {
-                    checkExpr(*val);
-                }
-                symbols_.enterScope();
-                checkBlock(c.body);
-                symbols_.exitScope();
-            }
-        }
         else if constexpr (std::is_same_v<T, stmt::Select>) {
             for (const auto& c : s.cases) {
                 symbols_.enterScope();

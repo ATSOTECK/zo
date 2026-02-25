@@ -28,9 +28,6 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::Else:           return "else";
         case TokenKind::For:            return "for";
         case TokenKind::Range:          return "range";
-        case TokenKind::Switch:         return "switch";
-        case TokenKind::Case:           return "case";
-        case TokenKind::Default:        return "default";
         case TokenKind::Select:         return "select";
         case TokenKind::Go:             return "go";
         case TokenKind::Defer:          return "defer";
@@ -119,9 +116,6 @@ const std::unordered_map<std::string, TokenKind>& keywordMap() {
         {"else",        TokenKind::Else},
         {"for",         TokenKind::For},
         {"range",       TokenKind::Range},
-        {"switch",      TokenKind::Switch},
-        {"case",        TokenKind::Case},
-        {"default",     TokenKind::Default},
         {"select",      TokenKind::Select},
         {"go",          TokenKind::Go},
         {"defer",       TokenKind::Defer},
