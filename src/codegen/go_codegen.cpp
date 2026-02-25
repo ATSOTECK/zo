@@ -40,12 +40,74 @@ std::string GoCodegen::generate(const File& file) {
     out_.str("");
     out_.clear();
     indentLevel_ = 0;
+    enums_.clear();
+    unions_.clear();
+
+    // Pre-scan for enum and union declarations to enable shorthand resolution
+    for (const auto& decl : file.decls) {
+        if (auto* e = std::get_if<decl::Enum>(&decl.kind)) {
+            EnumInfo info;
+            info.name = e->name;
+            info.underlying = "int";
+            if (e->underlying_type.has_value()) {
+                // Extract underlying type name
+                if (auto* named = std::get_if<type_ref::Named>(&(*e->underlying_type)->kind)) {
+                    info.underlying = mapType(named->name);
+                }
+            }
+            for (const auto& v : e->variants) {
+                info.variants.push_back(v.name);
+            }
+            enums_.push_back(std::move(info));
+        } else if (auto* u = std::get_if<decl::Union>(&decl.kind)) {
+            UnionInfo info;
+            info.name = u->name;
+            for (const auto& v : u->variants) {
+                UnionVariantInfo vi;
+                vi.name = v.name;
+                for (const auto& f : v.fields) {
+                    std::string capName = f.name;
+                    if (!capName.empty()) capName[0] = std::toupper(capName[0]);
+                    vi.fieldNames.push_back(capName);
+                }
+                info.variants.push_back(std::move(vi));
+            }
+            unions_.push_back(std::move(info));
+        }
+    }
 
     for (const auto& decl : file.decls) {
         emitDecl(decl);
     }
 
     return out_.str();
+}
+
+std::string GoCodegen::resolveEnumVariant(const std::string& variant,
+                                           const std::optional<std::string>& typeName) const {
+    if (typeName.has_value()) {
+        return *typeName + variant;
+    }
+    // Search enums for the variant
+    for (const auto& e : enums_) {
+        for (const auto& v : e.variants) {
+            if (v == variant) return e.name + variant;
+        }
+    }
+    // Search unions for the variant
+    for (const auto& u : unions_) {
+        for (const auto& v : u.variants) {
+            if (v.name == variant) return u.name + variant;
+        }
+    }
+    return variant;  // fallback
+}
+
+bool GoCodegen::isUnionType(const std::string& name) const {
+    for (const auto& u : unions_) {
+        if (u.name == name) return true;
+    }
+    return false;
 }
 
 void GoCodegen::emitDecl(const Decl& decl) {
@@ -101,8 +163,13 @@ void GoCodegen::emitDecl(const Decl& decl) {
             write("\n");
         }
         else if constexpr (std::is_same_v<T, decl::ImplBlock>) {
+            // Check if target is an enum (use value receiver)
+            bool isEnum = false;
+            for (const auto& e : enums_) {
+                if (e.name == d.target) { isEnum = true; break; }
+            }
             for (const auto& method : d.methods) {
-                emitFunc(method, d.target);
+                emitFunc(method, d.target, isEnum);
                 write("\n");
             }
             if (d.interface_name.has_value()) {
@@ -116,15 +183,25 @@ void GoCodegen::emitDecl(const Decl& decl) {
             emitTypeRef(*d.type);
             write("\n\n");
         }
+        else if constexpr (std::is_same_v<T, decl::Enum>) {
+            emitEnum(d);
+        }
+        else if constexpr (std::is_same_v<T, decl::Union>) {
+            emitUnion(d);
+        }
     }, decl.kind);
 }
 
-void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver) {
+void GoCodegen::emitFunc(const decl::Func& fn, const std::string& receiver, bool valueReceiver) {
     writeIndent();
     write("func ");
 
     if (!receiver.empty()) {
-        write("(this *" + receiver + ") ");
+        if (valueReceiver) {
+            write("(this " + receiver + ") ");
+        } else {
+            write("(this *" + receiver + ") ");
+        }
     }
 
     write(fn.name + "(");
@@ -311,6 +388,9 @@ void GoCodegen::emitStmt(const Stmt& stmt) {
                 dedent();
             }
             writeln("}");
+        }
+        else if constexpr (std::is_same_v<T, stmt::Match>) {
+            emitMatch(s);
         }
         else if constexpr (std::is_same_v<T, stmt::Select>) {
             writeln("select {");
@@ -562,7 +642,193 @@ void GoCodegen::emitExpr(const Expr& expr) {
             emitTypeRef(*e.type);
             write(")");
         }
+        else if constexpr (std::is_same_v<T, expr::EnumVariant>) {
+            write(resolveEnumVariant(e.variant, e.type_name));
+        }
+        else if constexpr (std::is_same_v<T, expr::UnionVariant>) {
+            write(resolveEnumVariant(e.variant, e.type_name));
+        }
     }, expr.kind);
+}
+
+void GoCodegen::emitEnum(const decl::Enum& e) {
+    // Determine underlying Go type
+    std::string goType = "int";
+    if (e.underlying_type.has_value()) {
+        if (auto* named = std::get_if<type_ref::Named>(&(*e.underlying_type)->kind)) {
+            goType = mapType(named->name);
+        }
+    }
+
+    writeln("type " + e.name + " " + goType);
+
+    // Check if any variant has an explicit value
+    bool hasExplicitValues = false;
+    for (const auto& v : e.variants) {
+        if (v.value.has_value()) {
+            hasExplicitValues = true;
+            break;
+        }
+    }
+
+    writeln("const (");
+    indent();
+    for (size_t i = 0; i < e.variants.size(); ++i) {
+        const auto& v = e.variants[i];
+        writeIndent();
+        if (hasExplicitValues) {
+            write(e.name + v.name + " " + e.name);
+            if (v.value.has_value()) {
+                write(" = ");
+                emitExpr(**v.value);
+            }
+        } else {
+            if (i == 0) {
+                write(e.name + v.name + " " + e.name + " = iota");
+            } else {
+                write(e.name + v.name);
+            }
+        }
+        write("\n");
+    }
+    dedent();
+    writeln(")");
+    write("\n");
+}
+
+void GoCodegen::emitUnion(const decl::Union& u) {
+    // Emit interface
+    writeln("type " + u.name + " interface{ is" + u.name + "() }");
+
+    // Emit variant structs + marker methods
+    for (const auto& v : u.variants) {
+        writeIndent();
+        write("type " + u.name + v.name + " struct{");
+        if (!v.fields.empty()) {
+            write(" ");
+            for (size_t i = 0; i < v.fields.size(); ++i) {
+                if (i > 0) write("; ");
+                // Capitalize field name for export
+                std::string fieldName = v.fields[i].name;
+                if (!fieldName.empty()) {
+                    fieldName[0] = std::toupper(fieldName[0]);
+                }
+                write(fieldName + " ");
+                emitTypeRef(*v.fields[i].type);
+            }
+            write(" ");
+        }
+        write("}\n");
+        writeln("func (" + u.name + v.name + ") is" + u.name + "() {}");
+    }
+    write("\n");
+}
+
+void GoCodegen::emitMatch(const stmt::Match& m) {
+    // Determine if this is a union type switch or an enum value switch
+    // We check the patterns: if any arm has UnionVariant patterns, use type switch
+    bool isUnionMatch = false;
+    for (const auto& arm : m.arms) {
+        for (const auto& pat : arm.patterns) {
+            if (std::holds_alternative<expr::UnionVariant>(pat->kind)) {
+                isUnionMatch = true;
+                break;
+            }
+            // Also check if an EnumVariant resolves to a union
+            if (auto* ev = std::get_if<expr::EnumVariant>(&pat->kind)) {
+                if (ev->type_name.has_value() && isUnionType(*ev->type_name)) {
+                    isUnionMatch = true;
+                } else if (!ev->type_name.has_value()) {
+                    // Search unions
+                    for (const auto& u : unions_) {
+                        for (const auto& v : u.variants) {
+                            if (v.name == ev->variant) {
+                                isUnionMatch = true;
+                                break;
+                            }
+                        }
+                        if (isUnionMatch) break;
+                    }
+                }
+            }
+        }
+        if (isUnionMatch) break;
+    }
+
+    writeIndent();
+    if (isUnionMatch) {
+        write("switch __v := ");
+        emitExpr(*m.value);
+        write(".(type) {\n");
+    } else {
+        write("switch ");
+        emitExpr(*m.value);
+        write(" {\n");
+    }
+
+    for (const auto& arm : m.arms) {
+        writeIndent();
+
+        // Check for wildcard
+        bool isDefault = false;
+        for (const auto& pat : arm.patterns) {
+            if (auto* ident = std::get_if<expr::Ident>(&pat->kind)) {
+                if (ident->name == "_") {
+                    isDefault = true;
+                    break;
+                }
+            }
+        }
+
+        if (isDefault) {
+            write("default:\n");
+        } else {
+            write("case ");
+            for (size_t i = 0; i < arm.patterns.size(); ++i) {
+                if (i > 0) write(", ");
+                const auto& pat = *arm.patterns[i];
+                if (auto* ev = std::get_if<expr::EnumVariant>(&pat.kind)) {
+                    write(resolveEnumVariant(ev->variant, ev->type_name));
+                } else if (auto* uv = std::get_if<expr::UnionVariant>(&pat.kind)) {
+                    write(resolveEnumVariant(uv->variant, uv->type_name));
+                } else {
+                    emitExpr(pat);
+                }
+            }
+            write(":\n");
+        }
+
+        indent();
+
+        // Emit destructuring bindings for union match
+        if (isUnionMatch && !isDefault) {
+            for (const auto& pat : arm.patterns) {
+                if (auto* uv = std::get_if<expr::UnionVariant>(&pat->kind)) {
+                    if (!uv->bindings.empty()) {
+                        // Find the union variant to get field names
+                        for (const auto& u : unions_) {
+                            for (const auto& v : u.variants) {
+                                if (v.name == uv->variant) {
+                                    for (size_t i = 0; i < uv->bindings.size() && i < v.fieldNames.size(); ++i) {
+                                        writeIndent();
+                                        write(uv->bindings[i] + " := __v." + v.fieldNames[i] + "\n");
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const auto& s : arm.body) {
+            emitStmt(*s);
+        }
+        dedent();
+    }
+
+    writeln("}");
 }
 
 void GoCodegen::emitTypeRef(const TypeRef& type) {

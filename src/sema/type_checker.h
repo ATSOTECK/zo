@@ -25,6 +25,13 @@ private:
     DiagnosticEngine& diag_;
     SymbolTable symbols_;
     std::string currentPackage_;
+
+    struct EnumMeta {
+        std::string name;
+        std::vector<std::string> variants;
+    };
+    std::unordered_map<std::string, EnumMeta> enumTypes_;
+    std::unordered_map<std::string, EnumMeta> unionTypes_;
 };
 
 } // namespace zo

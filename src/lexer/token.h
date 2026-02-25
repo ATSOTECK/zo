@@ -28,6 +28,7 @@ enum class TokenKind {
     Implements,
     Interface,
     Enum,
+    Union,
     Match,
     Try,
     If,

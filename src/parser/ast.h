@@ -104,6 +104,15 @@ namespace expr {
     };
     struct SliceExpr   { ExprPtr object; ExprPtr low; ExprPtr high; };  // a[lo:hi]
     struct TypeAssert  { ExprPtr object; TypeRefPtr type; };  // x.(Type)
+    struct EnumVariant {
+        std::optional<std::string> type_name;  // "Color" or empty for shorthand
+        std::string variant;                    // "Red"
+    };
+    struct UnionVariant {
+        std::optional<std::string> type_name;
+        std::string variant;
+        std::vector<std::string> bindings;  // destructured variable names
+    };
 }
 
 using ExprKind = std::variant<
@@ -126,7 +135,9 @@ using ExprKind = std::variant<
     expr::KeyValue,
     expr::Closure,
     expr::SliceExpr,
-    expr::TypeAssert
+    expr::TypeAssert,
+    expr::EnumVariant,
+    expr::UnionVariant
 >;
 
 struct Expr {
@@ -135,6 +146,12 @@ struct Expr {
 };
 
 // ─── Statements ─────────────────────────────────────────────────────
+
+struct MatchArm {
+    std::vector<ExprPtr> patterns;  // enum variants, literals, or Ident("_")
+    std::vector<StmtPtr> body;
+    SourceLocation loc;
+};
 
 struct SwitchCase {
     std::vector<ExprPtr> values;    // empty = default case
@@ -189,6 +206,10 @@ namespace stmt {
     struct GoStmt     { ExprPtr call; };
     struct DeferStmt  { ExprPtr call; };
     struct IncDec     { ExprPtr operand; TokenKind op; };  // ++ or --
+    struct Match      {
+        ExprPtr value;
+        std::vector<MatchArm> arms;
+    };
     struct Break      {};
     struct Continue   {};
     struct Fallthrough{};
@@ -205,6 +226,7 @@ using StmtKind = std::variant<
     stmt::ForRange,
     stmt::Switch,
     stmt::Select,
+    stmt::Match,
     stmt::Send,
     stmt::GoStmt,
     stmt::DeferStmt,
@@ -220,6 +242,18 @@ struct Stmt {
 };
 
 // ─── Top-level declarations ─────────────────────────────────────────
+
+struct EnumVariantDef {
+    std::string name;
+    std::optional<ExprPtr> value;  // explicit value (e.g., Active = 1)
+    SourceLocation loc;
+};
+
+struct UnionVariantDef {
+    std::string name;
+    std::vector<Field> fields;  // associated data fields
+    SourceLocation loc;
+};
 
 namespace decl {
     struct Package {
@@ -258,6 +292,17 @@ namespace decl {
         std::string name;
         TypeRefPtr type;
     };
+
+    struct Enum {
+        std::string name;
+        std::optional<TypeRefPtr> underlying_type;  // for enum Shape: f32
+        std::vector<EnumVariantDef> variants;
+    };
+
+    struct Union {
+        std::string name;
+        std::vector<UnionVariantDef> variants;
+    };
 }
 
 using DeclKind = std::variant<
@@ -267,7 +312,9 @@ using DeclKind = std::variant<
     decl::Struct,
     decl::Interface,
     decl::ImplBlock,
-    decl::TypeAlias
+    decl::TypeAlias,
+    decl::Enum,
+    decl::Union
 >;
 
 struct Decl {

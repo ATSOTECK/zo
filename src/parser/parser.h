@@ -36,6 +36,11 @@ private:
     decl::Struct parseStructBody(const std::string& name);
     decl::Interface parseInterface();
     decl::ImplBlock parseImpl();
+    decl::Enum parseEnum();
+    decl::Union parseUnion();
+
+    // Statements (match)
+    StmtPtr parseMatch();
 
     // Types
     TypeRefPtr parseType();

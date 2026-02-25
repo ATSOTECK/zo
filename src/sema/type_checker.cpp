@@ -1,5 +1,6 @@
 #include "sema/type_checker.h"
 
+#include <unordered_set>
 #include <variant>
 
 namespace zo {
@@ -87,6 +88,29 @@ void TypeChecker::registerDecl(const Decl& decl) {
         else if constexpr (std::is_same_v<T, decl::TypeAlias>) {
             symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
         }
+        else if constexpr (std::is_same_v<T, decl::Enum>) {
+            symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
+            EnumMeta meta;
+            meta.name = d.name;
+            for (const auto& v : d.variants) {
+                meta.variants.push_back(v.name);
+                // Register each variant as a constant
+                symbols_.define(d.name + v.name,
+                    Symbol{d.name + v.name, SymbolKind::Constant, v.loc, d.name});
+            }
+            enumTypes_[d.name] = std::move(meta);
+        }
+        else if constexpr (std::is_same_v<T, decl::Union>) {
+            symbols_.define(d.name, Symbol{d.name, SymbolKind::Type, decl.loc, d.name});
+            EnumMeta meta;
+            meta.name = d.name;
+            for (const auto& v : d.variants) {
+                meta.variants.push_back(v.name);
+                symbols_.define(d.name + v.name,
+                    Symbol{d.name + v.name, SymbolKind::Type, v.loc, d.name});
+            }
+            unionTypes_[d.name] = std::move(meta);
+        }
     }, decl.kind);
 }
 
@@ -96,6 +120,27 @@ void TypeChecker::checkDecl(const Decl& decl) {
 
         if constexpr (std::is_same_v<T, decl::Func>) {
             checkFunc(d);
+        }
+        else if constexpr (std::is_same_v<T, decl::Enum>) {
+            // Check for duplicate variants
+            std::unordered_set<std::string> seen;
+            for (const auto& v : d.variants) {
+                if (!seen.insert(v.name).second) {
+                    diag_.error(v.loc, "duplicate enum variant '" + v.name + "'");
+                }
+                if (v.value.has_value()) {
+                    checkExpr(**v.value);
+                }
+            }
+        }
+        else if constexpr (std::is_same_v<T, decl::Union>) {
+            // Check for duplicate variants
+            std::unordered_set<std::string> seen;
+            for (const auto& v : d.variants) {
+                if (!seen.insert(v.name).second) {
+                    diag_.error(v.loc, "duplicate union variant '" + v.name + "'");
+                }
+            }
         }
         else if constexpr (std::is_same_v<T, decl::ImplBlock>) {
             // Verify the target type exists
@@ -210,6 +255,23 @@ void TypeChecker::checkStmt(const Stmt& stmt) {
                 symbols_.exitScope();
             }
         }
+        else if constexpr (std::is_same_v<T, stmt::Match>) {
+            checkExpr(*s.value);
+            for (const auto& arm : s.arms) {
+                symbols_.enterScope();
+                // Register destructured bindings from union variant patterns
+                for (const auto& pat : arm.patterns) {
+                    if (auto* uv = std::get_if<expr::UnionVariant>(&pat->kind)) {
+                        for (const auto& binding : uv->bindings) {
+                            symbols_.define(binding,
+                                Symbol{binding, SymbolKind::Variable, pat->loc, "match_binding"});
+                        }
+                    }
+                }
+                checkBlock(arm.body);
+                symbols_.exitScope();
+            }
+        }
         else if constexpr (std::is_same_v<T, stmt::Send>) {
             checkExpr(*s.channel);
             checkExpr(*s.value);
@@ -298,6 +360,24 @@ void TypeChecker::checkExpr(const Expr& expr) {
         }
         else if constexpr (std::is_same_v<T, expr::TypeAssert>) {
             checkExpr(*e.object);
+        }
+        else if constexpr (std::is_same_v<T, expr::EnumVariant>) {
+            // Validate the variant exists in the named enum/union
+            if (e.type_name.has_value()) {
+                auto it = enumTypes_.find(*e.type_name);
+                if (it != enumTypes_.end()) {
+                    bool found = false;
+                    for (const auto& v : it->second.variants) {
+                        if (v == e.variant) { found = true; break; }
+                    }
+                    if (!found) {
+                        diag_.error(expr.loc, "'" + e.variant + "' is not a variant of '" + *e.type_name + "'");
+                    }
+                }
+            }
+        }
+        else if constexpr (std::is_same_v<T, expr::UnionVariant>) {
+            // Union variant patterns — validated in match context
         }
         // Literals (StringLit, IntLit, FloatLit, BoolLit, NilLit, This) — nothing to check
     }, expr.kind);

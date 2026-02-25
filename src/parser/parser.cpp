@@ -59,6 +59,8 @@ void Parser::synchronize() {
             case TokenKind::Struct:
             case TokenKind::Impl:
             case TokenKind::Enum:
+            case TokenKind::Union:
+            case TokenKind::Match:
             case TokenKind::Interface:
                 return;
             default:
@@ -93,6 +95,8 @@ Decl Parser::parseDecl() {
     if (check(TokenKind::Import))  return Decl{parseImport(), location};
     if (check(TokenKind::Func))    return Decl{parseFunc(), location};
     if (check(TokenKind::Impl))    return Decl{parseImpl(), location};
+    if (check(TokenKind::Enum))    return Decl{parseEnum(), location};
+    if (check(TokenKind::Union))   return Decl{parseUnion(), location};
     if (check(TokenKind::Type))    return parseTypeDecl();
 
     diag_.error(peek().loc, "expected declaration, got '" + peek().text + "'");
@@ -232,6 +236,212 @@ decl::ImplBlock Parser::parseImpl() {
     expectSemicolon();
 
     return decl::ImplBlock{target, iface, std::move(methods)};
+}
+
+// ─── Enum & Union declarations ──────────────────────────────────────
+
+decl::Enum Parser::parseEnum() {
+    expect(TokenKind::Enum, "expected 'enum'");
+    auto name = expect(TokenKind::Ident, "expected enum name").text;
+
+    // Optional underlying type: enum Color: f32 { ... }
+    std::optional<TypeRefPtr> underlying;
+    if (match(TokenKind::Colon)) {
+        underlying = parseType();
+    }
+
+    expect(TokenKind::LBrace, "expected '{'");
+
+    std::vector<EnumVariantDef> variants;
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        if (match(TokenKind::Semicolon)) continue;
+
+        auto varLoc = loc();
+        auto varName = expect(TokenKind::Ident, "expected variant name").text;
+
+        std::optional<ExprPtr> value;
+        if (match(TokenKind::Assign)) {
+            value = parseExpr();
+        }
+
+        variants.push_back(EnumVariantDef{varName, std::move(value), varLoc});
+
+        // Allow comma, semicolon, or newline between variants
+        if (!check(TokenKind::RBrace)) {
+            if (!match(TokenKind::Comma)) {
+                match(TokenKind::Semicolon);
+            }
+        }
+    }
+
+    expect(TokenKind::RBrace, "expected '}'");
+    expectSemicolon();
+
+    return decl::Enum{name, std::move(underlying), std::move(variants)};
+}
+
+decl::Union Parser::parseUnion() {
+    expect(TokenKind::Union, "expected 'union'");
+    auto name = expect(TokenKind::Ident, "expected union name").text;
+
+    expect(TokenKind::LBrace, "expected '{'");
+
+    std::vector<UnionVariantDef> variants;
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        if (match(TokenKind::Semicolon)) continue;
+
+        auto varLoc = loc();
+        auto varName = expect(TokenKind::Ident, "expected variant name").text;
+
+        std::vector<Field> fields;
+        if (match(TokenKind::LParen)) {
+            // Parse fields: name type, name type, ...
+            if (!check(TokenKind::RParen)) {
+                auto fLoc = loc();
+                auto fName = expect(TokenKind::Ident, "expected field name").text;
+                auto fType = parseType();
+                fields.push_back(Field{fName, std::move(fType), fLoc});
+                while (match(TokenKind::Comma)) {
+                    fLoc = loc();
+                    fName = expect(TokenKind::Ident, "expected field name").text;
+                    fType = parseType();
+                    fields.push_back(Field{fName, std::move(fType), fLoc});
+                }
+            }
+            expect(TokenKind::RParen, "expected ')'");
+        }
+
+        variants.push_back(UnionVariantDef{varName, std::move(fields), varLoc});
+
+        // Allow comma, semicolon, or newline between variants
+        if (!check(TokenKind::RBrace)) {
+            if (!match(TokenKind::Comma)) {
+                match(TokenKind::Semicolon);
+            }
+        }
+    }
+
+    expect(TokenKind::RBrace, "expected '}'");
+    expectSemicolon();
+
+    return decl::Union{name, std::move(variants)};
+}
+
+// ─── Match statement ────────────────────────────────────────────────
+
+StmtPtr Parser::parseMatch() {
+    auto location = loc();
+    expect(TokenKind::Match, "expected 'match'");
+
+    // Parse the tag expression (disable composite literals to avoid { ambiguity)
+    auto savedCL = compositeLitOk_;
+    compositeLitOk_ = false;
+    auto value = parseExpr();
+    compositeLitOk_ = savedCL;
+
+    expect(TokenKind::LBrace, "expected '{'");
+
+    std::vector<MatchArm> arms;
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        if (match(TokenKind::Semicolon)) continue;
+
+        auto armLoc = loc();
+        std::vector<ExprPtr> patterns;
+
+        // Parse pattern(s) separated by commas
+        // Pattern: .Variant, Type.Variant, _, .Variant(bindings), or literal
+        auto parsePattern = [this]() -> ExprPtr {
+            auto patLoc = loc();
+
+            // _ wildcard
+            if (check(TokenKind::Ident) && peek().text == "_") {
+                advance();
+                return makeExpr<expr::Ident>(patLoc, std::string("_"));
+            }
+
+            // .Variant or .Variant(bindings)
+            if (check(TokenKind::Dot)) {
+                advance();
+                auto variant = expect(TokenKind::Ident, "expected variant name after '.'").text;
+
+                // Check for destructuring: .Variant(a, b)
+                if (check(TokenKind::LParen)) {
+                    advance();
+                    std::vector<std::string> bindings;
+                    if (!check(TokenKind::RParen)) {
+                        bindings.push_back(expect(TokenKind::Ident, "expected binding name").text);
+                        while (match(TokenKind::Comma)) {
+                            bindings.push_back(expect(TokenKind::Ident, "expected binding name").text);
+                        }
+                    }
+                    expect(TokenKind::RParen, "expected ')'");
+                    return makeExpr<expr::UnionVariant>(patLoc,
+                        std::optional<std::string>{}, variant, std::move(bindings));
+                }
+
+                return makeExpr<expr::EnumVariant>(patLoc,
+                    std::optional<std::string>{}, variant);
+            }
+
+            // Type.Variant
+            if (check(TokenKind::Ident) && peekNext().kind == TokenKind::Dot) {
+                auto typeName = advance().text;
+                advance(); // consume .
+                auto variant = expect(TokenKind::Ident, "expected variant name").text;
+
+                // Check for destructuring
+                if (check(TokenKind::LParen)) {
+                    advance();
+                    std::vector<std::string> bindings;
+                    if (!check(TokenKind::RParen)) {
+                        bindings.push_back(expect(TokenKind::Ident, "expected binding name").text);
+                        while (match(TokenKind::Comma)) {
+                            bindings.push_back(expect(TokenKind::Ident, "expected binding name").text);
+                        }
+                    }
+                    expect(TokenKind::RParen, "expected ')'");
+                    return makeExpr<expr::UnionVariant>(patLoc,
+                        std::optional<std::string>{typeName}, variant, std::move(bindings));
+                }
+
+                return makeExpr<expr::EnumVariant>(patLoc,
+                    std::optional<std::string>{typeName}, variant);
+            }
+
+            // Literal expression (int, string, etc.)
+            return parseExpr();
+        };
+
+        patterns.push_back(parsePattern());
+        while (match(TokenKind::Comma)) {
+            // Check if next token starts a pattern (not the body)
+            if (check(TokenKind::RBrace) || check(TokenKind::Eof)) break;
+            patterns.push_back(parsePattern());
+        }
+
+        expect(TokenKind::Colon, "expected ':' after match pattern");
+
+        // Parse body statements until next pattern or }
+        // A new pattern starts with: . _ Ident(followed by .) or is a literal at the start of line
+        std::vector<StmtPtr> body;
+        while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+            // Check if this looks like a new arm
+            if (check(TokenKind::Dot) && peekNext().kind == TokenKind::Ident) break;
+            if (check(TokenKind::Ident) && peek().text == "_" &&
+                (peekNext().kind == TokenKind::Colon || peekNext().kind == TokenKind::Comma)) break;
+            if (check(TokenKind::Ident) && peekNext().kind == TokenKind::Dot) break;
+
+            if (match(TokenKind::Semicolon)) continue;
+            body.push_back(parseStmt());
+        }
+
+        arms.push_back(MatchArm{std::move(patterns), std::move(body), armLoc});
+    }
+
+    expect(TokenKind::RBrace, "expected '}'");
+    expectSemicolon();
+
+    return makeStmt<stmt::Match>(location, std::move(value), std::move(arms));
 }
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -384,6 +594,7 @@ StmtPtr Parser::parseStmt() {
     if (check(TokenKind::For))         return parseFor();
     if (check(TokenKind::Switch))      return parseSwitch();
     if (check(TokenKind::Select))      return parseSelect();
+    if (check(TokenKind::Match))       return parseMatch();
     if (check(TokenKind::Break)) {
         advance();
         expectSemicolon();

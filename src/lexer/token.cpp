@@ -21,6 +21,7 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::Implements:     return "implements";
         case TokenKind::Interface:      return "interface";
         case TokenKind::Enum:           return "enum";
+        case TokenKind::Union:          return "union";
         case TokenKind::Match:          return "match";
         case TokenKind::Try:            return "try";
         case TokenKind::If:             return "if";
@@ -111,6 +112,7 @@ const std::unordered_map<std::string, TokenKind>& keywordMap() {
         {"implements",  TokenKind::Implements},
         {"interface",   TokenKind::Interface},
         {"enum",        TokenKind::Enum},
+        {"union",       TokenKind::Union},
         {"match",       TokenKind::Match},
         {"try",         TokenKind::Try},
         {"if",          TokenKind::If},
