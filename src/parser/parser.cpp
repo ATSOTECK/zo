@@ -265,15 +265,10 @@ decl::Interface Parser::parseInterface() {
 decl::ImplBlock Parser::parseImpl() {
     expect(TokenKind::Impl, "expected 'impl'");
 
-    // impl<T> Stack<T> { ... }
-    std::vector<TypeParam> typeParams;
-    if (check(TokenKind::Less)) {
-        typeParams = parseTypeParams();
-    }
-
     auto target = expect(TokenKind::Ident, "expected type name").text;
 
-    // Parse target type args: impl<T> Stack<T> { ... }
+    // Parse target type args: impl Stack<T> { ... }
+    std::vector<TypeParam> typeParams;
     std::vector<std::string> targetTypeArgs;
     if (check(TokenKind::Less)) {
         expect(TokenKind::Less, "expected '<'");
@@ -288,6 +283,10 @@ decl::ImplBlock Parser::parseImpl() {
             pendingGreater_ = true;
         } else {
             expect(TokenKind::Greater, "expected '>'");
+        }
+        // Infer type params from target type args
+        for (const auto& arg : targetTypeArgs) {
+            typeParams.push_back({arg, std::nullopt, {}});
         }
     }
 
